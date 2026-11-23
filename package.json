@@ -7,7 +7,8 @@
     "dev": "vite",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "qa:e2e": "node tests/e2e/run-qa.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",

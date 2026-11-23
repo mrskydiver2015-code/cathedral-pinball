@@ -1,43 +1,306 @@
-import type { WebGPURenderer } from 'three/webgpu';
-import type RAPIER from '@dimforge/rapier3d-compat';
+import * as THREE from 'three/webgpu';
+import { TABLE_GLB_PATH } from './assets/manifest.ts';
+import { PinballAudioSynth } from './audio/synth.ts';
+import { PinballGameController } from './game/pinballGame.ts';
+import { PinballRenderer } from './render/renderer.ts';
 import { createEventBus } from './shared/events.ts';
-import {
-  COORDINATE_SYSTEM,
-  TABLE_SPEC,
-  blenderToThree,
-  playfieldLocalToWorld,
-} from './shared/tableSpec.ts';
-import type { RendererBackendKind } from './shared/types.ts';
+import type { PinballDebugHandle, Side } from './shared/types.ts';
+import { PinballHud } from './ui/hud.ts';
 
-/**
- * Type-only contract verification ensuring 2026 Three.js WebGPU and Rapier3D types
- * compile cleanly against frozen shared contracts prior to Phase 2 /swarm execution.
- */
-export interface Phase1ContractSmoke {
-  readonly rendererType: WebGPURenderer | null;
-  readonly rapierModule: typeof RAPIER | null;
-  readonly preferredBackend: RendererBackendKind;
+function getForceWebGLFlag(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('forceWebGL') === '1' || params.get('forceWebGL') === 'true';
 }
 
-const bus = createEventBus();
-const leftFlipperWorld = playfieldLocalToWorld(TABLE_SPEC.flippers.left.pivotLocal);
-const blenderOriginMapped = blenderToThree({ x: 0, y: 0, z: 0 });
-
-const app = document.querySelector<HTMLDivElement>('#app');
-if (app) {
-  app.style.display = 'grid';
-  app.style.placeItems = 'center';
-  app.style.padding = '24px';
-  app.innerHTML = `
-    <main style="max-width: 640px; line-height: 1.5;">
-      <h1 style="margin: 0 0 8px; font-size: 1.25rem;">Cathedral Pinball — Phase 1 Contracts Frozen</h1>
-      <p style="margin: 0; opacity: 0.8;">
-        Tilt ${COORDINATE_SYSTEM.tiltDeg}° (${COORDINATE_SYSTEM.blenderUpAxis} → ${COORDINATE_SYSTEM.threeRapierUpAxis}),
-        playfield ${TABLE_SPEC.cabinet.innerWidth}m × ${TABLE_SPEC.cabinet.innerLength}m,
-        left flipper world Y=${leftFlipperWorld.y.toFixed(4)}m,
-        origin=(${blenderOriginMapped.x}, ${blenderOriginMapped.y}, ${blenderOriginMapped.z}),
-        event keys tracked=${Object.keys(bus.getEventCounts()).length}.
-      </p>
-    </main>
-  `;
+function isInteractiveUiTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest('[data-ui-control="true"], button'));
 }
+
+function bindControls(params: {
+  container: HTMLElement;
+  game: PinballGameController;
+  audio: PinballAudioSynth;
+  renderer: PinballRenderer;
+}): () => void {
+  const { container, game, audio, renderer } = params;
+
+  const keyLeft = new Set<string>();
+  const keyRight = new Set<string>();
+  const touchLeft = new Set<number>();
+  const touchRight = new Set<number>();
+  let plungerHeld = false;
+
+  const syncFlippers = (): void => {
+    game.setFlipperInput('left', keyLeft.size > 0 || touchLeft.size > 0);
+    game.setFlipperInput('right', keyRight.size > 0 || touchRight.size > 0);
+  };
+
+  const isLeftFlipperKey = (code: string): boolean =>
+    code === 'ArrowLeft' || code === 'KeyA' || code === 'ShiftLeft';
+  const isRightFlipperKey = (code: string): boolean =>
+    code === 'ArrowRight' || code === 'KeyD' || code === 'ShiftRight';
+  const isPlungerKey = (code: string): boolean =>
+    code === 'Space' || code === 'ArrowDown';
+
+  const onKeyDown = (event: KeyboardEvent): void => {
+    audio.unlock();
+
+    if (
+      event.code === 'Space' ||
+      event.code === 'ArrowLeft' ||
+      event.code === 'ArrowRight' ||
+      event.code === 'ArrowUp' ||
+      event.code === 'ArrowDown'
+    ) {
+      event.preventDefault();
+    }
+
+    if (event.repeat) return;
+
+    if (isLeftFlipperKey(event.code)) {
+      keyLeft.add(event.code);
+      syncFlippers();
+      return;
+    }
+
+    if (isRightFlipperKey(event.code)) {
+      keyRight.add(event.code);
+      syncFlippers();
+      return;
+    }
+
+    if (isPlungerKey(event.code)) {
+      if (!plungerHeld) {
+        plungerHeld = true;
+        game.setPlungerCharging(true);
+      }
+      return;
+    }
+
+    if (event.code === 'KeyZ') {
+      game.nudge('left');
+      return;
+    }
+    if (event.code === 'KeyX') {
+      game.nudge('right');
+      return;
+    }
+    if (event.code === 'ArrowUp' || event.code === 'KeyW') {
+      game.nudge('forward');
+      return;
+    }
+    if (event.code === 'KeyM') {
+      audio.toggleMute();
+      return;
+    }
+    if (event.code === 'KeyC') {
+      renderer.toggleCameraMode();
+      return;
+    }
+    if (event.code === 'Enter' || event.code === 'KeyR') {
+      game.startNewGame();
+    }
+  };
+
+  const onKeyUp = (event: KeyboardEvent): void => {
+    if (isLeftFlipperKey(event.code)) {
+      keyLeft.delete(event.code);
+      syncFlippers();
+      return;
+    }
+
+    if (isRightFlipperKey(event.code)) {
+      keyRight.delete(event.code);
+      syncFlippers();
+      return;
+    }
+
+    if (isPlungerKey(event.code) && plungerHeld) {
+      plungerHeld = false;
+      game.setPlungerCharging(false);
+    }
+  };
+
+  // True simultaneous multi-touch: left screen half -> Left Flipper, right half -> Right Flipper
+  const onPointerDown = (event: PointerEvent): void => {
+    audio.unlock();
+    if (isInteractiveUiTarget(event.target)) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+
+    const rect = container.getBoundingClientRect();
+    const isLeftHalf = event.clientX < rect.left + rect.width * 0.5;
+    if (isLeftHalf) {
+      touchLeft.add(event.pointerId);
+    } else {
+      touchRight.add(event.pointerId);
+    }
+    syncFlippers();
+  };
+
+  const releasePointer = (event: PointerEvent): void => {
+    const removedLeft = touchLeft.delete(event.pointerId);
+    const removedRight = touchRight.delete(event.pointerId);
+    if (removedLeft || removedRight) {
+      syncFlippers();
+    }
+  };
+
+  const onBlur = (): void => {
+    keyLeft.clear();
+    keyRight.clear();
+    touchLeft.clear();
+    touchRight.clear();
+    syncFlippers();
+    if (plungerHeld) {
+      plungerHeld = false;
+      game.setPlungerCharging(false);
+    }
+  };
+
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+  container.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointerup', releasePointer);
+  window.addEventListener('pointercancel', releasePointer);
+  window.addEventListener('blur', onBlur);
+
+  return () => {
+    window.removeEventListener('keydown', onKeyDown);
+    window.removeEventListener('keyup', onKeyUp);
+    container.removeEventListener('pointerdown', onPointerDown);
+    window.removeEventListener('pointerup', releasePointer);
+    window.removeEventListener('pointercancel', releasePointer);
+    window.removeEventListener('blur', onBlur);
+  };
+}
+
+async function bootstrap(): Promise<void> {
+  const container = document.querySelector<HTMLDivElement>('#app');
+  if (!container) {
+    throw new Error('Missing #app mount element');
+  }
+  container.innerHTML = '';
+  container.style.position = 'relative';
+  container.style.width = '100%';
+  container.style.height = '100dvh';
+  container.style.overflow = 'hidden';
+  container.style.touchAction = 'none';
+
+  const bus = createEventBus();
+  const forceWebGL = getForceWebGLFlag();
+
+  const [game, renderer] = await Promise.all([
+    PinballGameController.create(bus),
+    PinballRenderer.create(container, bus, {
+      forceWebGL,
+      glbUrl: TABLE_GLB_PATH,
+    }),
+  ]);
+
+  const audio = new PinballAudioSynth(bus);
+  const hud = new PinballHud(container, bus, {
+    onStartOrRestart: () => {
+      audio.unlock();
+      game.startNewGame();
+    },
+    onToggleMute: () => {
+      audio.unlock();
+      return audio.toggleMute();
+    },
+    onToggleCamera: () => {
+      audio.unlock();
+      renderer.toggleCameraMode();
+    },
+    onRescueBall: () => {
+      audio.unlock();
+      game.rescueStuckBalls();
+    },
+    onNudge: () => {
+      audio.unlock();
+      game.nudge('forward');
+    },
+    onPlungerDrag: (ratio: number) => {
+      audio.unlock();
+      game.setManualPlungerCharge(ratio);
+    },
+    onPlungerRelease: (ratio: number) => {
+      audio.unlock();
+      game.launchPlunger(ratio);
+    },
+  });
+
+  // Ready the first ball in the plunger lane immediately for instant play
+  game.startNewGame();
+
+  const debugHandle: PinballDebugHandle = {
+    getSnapshot: () => game.getSnapshot(),
+    getRendererCapabilities: () => renderer.getCapabilities(),
+    getEventCounts: () => bus.getEventCounts(),
+    setFlipperInput: (side: Side, pressed: boolean) => game.setFlipperInput(side, pressed),
+    setPlungerCharge: (ratio: number) => game.setManualPlungerCharge(ratio),
+    launchPlunger: (chargeRatio: number) => game.launchPlunger(chargeRatio),
+    rescueStuckBalls: () => game.rescueStuckBalls(),
+    forceMultiball: () => game.forceMultiball(),
+    resetGame: () => game.startNewGame(),
+  };
+  window.__PINBALL_DEBUG__ = debugHandle;
+
+  const unbindControls = bindControls({ container, game, audio, renderer });
+
+  const timer = new THREE.Timer();
+  timer.connect(document);
+  let rafId = 0;
+  let disposed = false;
+
+  const frame = (): void => {
+    if (disposed) return;
+    timer.update();
+    const dt = timer.getDelta();
+
+    const { snapshot, physics } = game.update(dt);
+    renderer.sync(
+      {
+        snapshot,
+        flipperAngles: physics.flipperAngles,
+        dropTargetDown: physics.dropTargetDown,
+        plungerPullM: physics.plungerPullM,
+      },
+      dt,
+    );
+    renderer.render();
+    hud.update(snapshot, renderer.getCapabilities());
+
+    rafId = window.requestAnimationFrame(frame);
+  };
+
+  rafId = window.requestAnimationFrame(frame);
+
+  window.addEventListener(
+    'pagehide',
+    () => {
+      if (disposed) return;
+      disposed = true;
+      window.cancelAnimationFrame(rafId);
+      unbindControls();
+      timer.disconnect();
+      timer.dispose();
+      hud.dispose();
+      audio.dispose();
+      renderer.dispose();
+      game.dispose();
+      delete window.__PINBALL_DEBUG__;
+    },
+    { once: true },
+  );
+}
+
+void bootstrap().catch((err: unknown) => {
+  console.error('[Cathedral Pinball] Fatal initialization error:', err);
+  const container = document.querySelector<HTMLDivElement>('#app');
+  if (container) {
+    container.innerHTML = `<pre style="padding:24px;color:#fda4af;">Initialization failed: ${
+      err instanceof Error ? err.message : String(err)
+    }</pre>`;
+  }
+});

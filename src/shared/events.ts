@@ -101,6 +101,26 @@ export interface PinballEventMap {
     readonly current: GamePhase;
     readonly snapshot: GameStateSnapshot;
   };
+  rolloverHit: {
+    readonly laneIndex: 0 | 1 | 2;
+    readonly skillShot: boolean;
+    readonly points: number;
+  };
+  ballSave: {
+    readonly ballId: number;
+    readonly remainingSec: number;
+  };
+  ballRescue: {
+    readonly ballId: number;
+    readonly manual: boolean;
+    readonly position: Vec3;
+  };
+  comboUpdate: {
+    readonly comboCount: number;
+    readonly multiplier: number;
+    readonly points: number;
+    readonly label: string;
+  };
 }
 
 export type PinballEventType = keyof PinballEventMap;

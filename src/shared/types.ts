@@ -66,6 +66,10 @@ export interface GameStateSnapshot {
   readonly plungerCharge: number;
   readonly leftFlipperActive: boolean;
   readonly rightFlipperActive: boolean;
+  readonly ballSaveRemainingSec: number;
+  readonly skillShotAvailable: boolean;
+  readonly comboCount: number;
+  readonly autoRescueCount: number;
   readonly balls: readonly BallTelemetry[];
 }
 
@@ -108,7 +112,9 @@ export interface PinballDebugHandle {
   getRendererCapabilities(): RendererCapabilities;
   getEventCounts(): Readonly<Record<string, number>>;
   setFlipperInput(side: Side, pressed: boolean): void;
+  setPlungerCharge(ratio: number): void;
   launchPlunger(chargeRatio: number): void;
+  rescueStuckBalls(): number;
   forceMultiball(): void;
   resetGame(): void;
 }
