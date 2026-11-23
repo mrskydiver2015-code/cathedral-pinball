@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Production build & Vite caches
+dist/
+.vite/
+*.tsbuildinfo
+
+# Local env & editor caches
+*.local
+.env
+.env.*
+!.env.example
+
+# Playwright / test caches (all QA artifacts must live in ..\Pinball dok)
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# OS noise
+.DS_Store
+Thumbs.db
