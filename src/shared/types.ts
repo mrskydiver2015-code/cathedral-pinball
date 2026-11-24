@@ -33,6 +33,16 @@ export type BumperId = 'bumper-top' | 'bumper-left' | 'bumper-right';
 export type DropTargetId = 'target-1' | 'target-2' | 'target-3';
 export type RampId = 'stained-glass-ramp';
 export type NudgeDirection = 'left' | 'right' | 'forward';
+export type CameraMode = 'classic' | 'action' | 'top';
+
+export interface HighScoreEntry {
+  readonly id: string;
+  readonly initials: string;
+  readonly score: number;
+  readonly maxMultiplier: number;
+  readonly dateIso: string;
+  readonly isPlayer?: boolean;
+}
 
 export type GamePhase =
   | 'attract'
@@ -111,6 +121,9 @@ export interface PinballDebugHandle {
   getSnapshot(): GameStateSnapshot;
   getRendererCapabilities(): RendererCapabilities;
   getEventCounts(): Readonly<Record<string, number>>;
+  getCameraMode(): CameraMode;
+  cycleCameraMode(): CameraMode;
+  getLeaderboard(): readonly HighScoreEntry[];
   setFlipperInput(side: Side, pressed: boolean): void;
   setPlungerCharge(ratio: number): void;
   launchPlunger(chargeRatio: number): void;

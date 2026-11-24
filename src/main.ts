@@ -14,7 +14,14 @@ function getForceWebGLFlag(): boolean {
 
 function isInteractiveUiTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
-  return Boolean(target.closest('[data-ui-control="true"], button'));
+  return Boolean(
+    target.closest('[data-ui-control="true"], [data-modal-card="true"], button, input'),
+  );
+}
+
+function isInsideLeaderboardScroll(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest('.cp-leaderboard-list'));
 }
 
 function bindControls(params: {
@@ -22,8 +29,9 @@ function bindControls(params: {
   game: PinballGameController;
   audio: PinballAudioSynth;
   renderer: PinballRenderer;
+  hud: PinballHud;
 }): () => void {
-  const { container, game, audio, renderer } = params;
+  const { container, game, audio, renderer, hud } = params;
 
   const keyLeft = new Set<string>();
   const keyRight = new Set<string>();
@@ -45,6 +53,12 @@ function bindControls(params: {
 
   const onKeyDown = (event: KeyboardEvent): void => {
     audio.unlock();
+
+    // Route keyboard input to High Score modal / initial entry when open
+    if (hud.isModalOpen()) {
+      hud.handleModalKeyDown(event);
+      return;
+    }
 
     if (
       event.code === 'Space' ||
@@ -95,7 +109,11 @@ function bindControls(params: {
       return;
     }
     if (event.code === 'KeyC') {
-      renderer.toggleCameraMode();
+      renderer.cycleCameraMode();
+      return;
+    }
+    if (event.code === 'KeyH' || event.code === 'KeyL') {
+      hud.openLeaderboardModal(false);
       return;
     }
     if (event.code === 'Enter' || event.code === 'KeyR') {
@@ -125,7 +143,7 @@ function bindControls(params: {
   // True simultaneous multi-touch: left screen half -> Left Flipper, right half -> Right Flipper
   const onPointerDown = (event: PointerEvent): void => {
     audio.unlock();
-    if (isInteractiveUiTarget(event.target)) return;
+    if (hud.isModalOpen() || isInteractiveUiTarget(event.target)) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
 
     const rect = container.getBoundingClientRect();
@@ -147,7 +165,6 @@ function bindControls(params: {
   };
 
   // Prevent iOS Safari pinch-to-zoom, double-tap zoom, and page rubber-band pan
-  // (iOS Safari ignores viewport user-scalable=no during multi-touch & rapid flipper taps)
   let lastTouchEndMs = 0;
   const preventGestureZoom = (event: Event): void => {
     event.preventDefault();
@@ -159,6 +176,9 @@ function bindControls(params: {
     }
   };
   const onDocumentTouchMove = (event: TouchEvent): void => {
+    if (hud.isModalOpen() && event.touches.length === 1 && isInsideLeaderboardScroll(event.target)) {
+      return;
+    }
     event.preventDefault();
   };
   const onDocumentTouchEnd = (event: TouchEvent): void => {
@@ -248,10 +268,11 @@ async function bootstrap(): Promise<void> {
       audio.unlock();
       return audio.toggleMute();
     },
-    onToggleCamera: () => {
+    onCycleCamera: () => {
       audio.unlock();
-      renderer.toggleCameraMode();
+      return renderer.cycleCameraMode();
     },
+    getCameraMode: () => renderer.getCameraMode(),
     onRescueBall: () => {
       audio.unlock();
       game.rescueStuckBalls();
@@ -268,6 +289,8 @@ async function bootstrap(): Promise<void> {
       audio.unlock();
       game.launchPlunger(ratio);
     },
+    getHighScoreStore: () => game.getHighScoreStore(),
+    getLastGameOverRecord: () => game.getLastGameOverRecord(),
   });
 
   // Ready the first ball in the plunger lane immediately for instant play
@@ -277,6 +300,9 @@ async function bootstrap(): Promise<void> {
     getSnapshot: () => game.getSnapshot(),
     getRendererCapabilities: () => renderer.getCapabilities(),
     getEventCounts: () => bus.getEventCounts(),
+    getCameraMode: () => renderer.getCameraMode(),
+    cycleCameraMode: () => renderer.cycleCameraMode(),
+    getLeaderboard: () => game.getHighScoreStore().getEntries(),
     setFlipperInput: (side: Side, pressed: boolean) => game.setFlipperInput(side, pressed),
     setPlungerCharge: (ratio: number) => game.setManualPlungerCharge(ratio),
     launchPlunger: (chargeRatio: number) => game.launchPlunger(chargeRatio),
@@ -286,7 +312,7 @@ async function bootstrap(): Promise<void> {
   };
   window.__PINBALL_DEBUG__ = debugHandle;
 
-  const unbindControls = bindControls({ container, game, audio, renderer });
+  const unbindControls = bindControls({ container, game, audio, renderer, hud });
 
   const timer = new THREE.Timer();
   timer.connect(document);

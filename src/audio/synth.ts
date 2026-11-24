@@ -20,6 +20,7 @@ export class PinballAudioSynth {
   private readonly bus: PinballEventBus;
   private readonly unsubscribers: Array<() => void> = [];
   private readonly gestureUnlockHandler: () => void;
+  private readonly visibilityHandler: () => void;
 
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
@@ -49,10 +50,21 @@ export class PinballAudioSynth {
     this.gestureUnlockHandler = () => {
       this.unlock();
     };
+    this.visibilityHandler = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        if (this.ctx) {
+          const state = this.ctx.state as string;
+          if (state !== 'running' && state !== 'closed') {
+            void this.ctx.resume().catch(() => undefined);
+          }
+        }
+      }
+    };
     if (typeof window !== 'undefined') {
       window.addEventListener('touchstart', this.gestureUnlockHandler, { passive: true });
       window.addEventListener('pointerdown', this.gestureUnlockHandler, { passive: true });
       window.addEventListener('keydown', this.gestureUnlockHandler, { passive: true });
+      document.addEventListener('visibilitychange', this.visibilityHandler);
     }
     this.bindEvents();
   }
@@ -90,12 +102,12 @@ export class PinballAudioSynth {
       }
     }
 
-    if (this.ctx && this.ctx.state === 'suspended') {
-      void this.ctx.resume().catch(() => undefined);
-    }
-
-    if (this.ctx && this.ctx.state === 'running') {
-      this.removeGestureListeners();
+    if (this.ctx) {
+      const state = this.ctx.state as string;
+      // iOS Safari can transition AudioContext to 'interrupted' or 'suspended' after app switching
+      if (state !== 'running' && state !== 'closed') {
+        void this.ctx.resume().catch(() => undefined);
+      }
     }
   }
 
@@ -171,6 +183,7 @@ export class PinballAudioSynth {
     window.removeEventListener('touchstart', this.gestureUnlockHandler);
     window.removeEventListener('pointerdown', this.gestureUnlockHandler);
     window.removeEventListener('keydown', this.gestureUnlockHandler);
+    document.removeEventListener('visibilitychange', this.visibilityHandler);
   }
 
   private initRollVoice(ctx: AudioContext, destination: AudioNode): void {
@@ -288,7 +301,23 @@ export class PinballAudioSynth {
       this.bus.on('ballRoll', ({ speedMps, onRamp }) => {
         this.updateBallRoll(speedMps, onRamp);
       }),
+      this.bus.on('gameStateChanged', ({ current, snapshot }) => {
+        if (current === 'gameOver' && snapshot.score > 0 && snapshot.score >= snapshot.highScore) {
+          this.playHighScoreFanfare();
+        }
+      }),
     );
+  }
+
+  private playHighScoreFanfare(): void {
+    const audio = this.getActiveOutput();
+    if (!audio) return;
+    const { ctx, out } = audio;
+    const now = ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1046.5, 1318.51, 1567.98];
+    notes.forEach((freq, idx) => {
+      this.playBellPartial(ctx, out, now + idx * 0.075, freq, 0.65, 0.14);
+    });
   }
 
   private nextComboPitchFactor(): number {

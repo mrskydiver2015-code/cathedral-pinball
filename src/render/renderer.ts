@@ -2,10 +2,12 @@ import * as THREE from 'three/webgpu';
 import { emissive, mrt, output, pass, texture, vec4 } from 'three/tsl';
 import { bloom } from 'three/addons/tsl/display/BloomNode.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { TABLE_SPEC } from '../shared/tableSpec.ts';
+import { TABLE_SPEC, playfieldLocalToWorld } from '../shared/tableSpec.ts';
 import type { PinballEventBus } from '../shared/events.ts';
 import type {
+  BallTelemetry,
   BumperId,
+  CameraMode,
   GameStateSnapshot,
   RendererBackendKind,
   RendererCapabilities,
@@ -28,7 +30,28 @@ export interface PhysicsVisualSync {
   readonly plungerPullM: number;
 }
 
-type CameraMode = 'player' | 'overview';
+const CAMERA_STORAGE_KEY = 'cathedral-pinball-camera-mode';
+const CAMERA_MODES_ORDER: readonly CameraMode[] = ['classic', 'action', 'top'];
+
+function loadStoredCameraMode(): CameraMode {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return 'classic';
+    const raw = window.localStorage.getItem(CAMERA_STORAGE_KEY);
+    if (raw === 'classic' || raw === 'action' || raw === 'top') return raw;
+  } catch {
+    // Ignore restricted storage
+  }
+  return 'classic';
+}
+
+function saveStoredCameraMode(mode: CameraMode): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(CAMERA_STORAGE_KEY, mode);
+  } catch {
+    // Ignore restricted storage
+  }
+}
 
 interface CameraPose {
   readonly position: THREE.Vector3;
@@ -68,13 +91,8 @@ const DROP_TARGET_TRAVEL_M = TABLE_SPEC.dropTargets.size.height + 0.004;
 const TRAIL_SEGMENTS_PER_BALL = 6;
 
 const PLAYER_POSE: CameraPose = {
-  position: new THREE.Vector3(-0.01, 0.96, 1.04),
-  target: new THREE.Vector3(-0.015, 0.18, -0.05),
-};
-
-const OVERVIEW_POSE: CameraPose = {
-  position: new THREE.Vector3(0.24, 1.44, 0.72),
-  target: new THREE.Vector3(-0.015, 0.17, -0.04),
+  position: new THREE.Vector3(0, 0.96, 1.04),
+  target: new THREE.Vector3(0, 0.18, -0.04),
 };
 
 interface AdaptiveCameraSpec {
@@ -83,51 +101,104 @@ interface AdaptiveCameraSpec {
   readonly target: THREE.Vector3;
 }
 
+interface ActionFocusState {
+  readonly focusX: number;
+  readonly focusZ: number;
+  readonly multiballZoomOut: number;
+}
+
 /**
- * Computes responsive camera FOV, distance, and elevation so the full 0.555 m cabinet width
- * (including plunger lane and both flippers) fits cleanly across desktop, portrait phones, and landscape phones.
+ * Computes symmetrical, responsive AAA camera poses across desktop, portrait phones, and landscape phones:
+ * - 'classic': Full centered cabinet & backglass view (never skewed)
+ * - 'action': Close-up (~45% larger scale) dynamic ball-tracking view with smooth Z/X follow
+ * - 'top': Symmetrical 79-deg overhead playfield view filling the screen cleanly
  */
 function computeAdaptiveCameraPose(
   width: number,
   height: number,
   mode: CameraMode,
+  actionFocus?: ActionFocusState,
 ): AdaptiveCameraSpec {
   const aspect = Math.max(width / Math.max(height, 1), 0.32);
 
-  if (aspect >= 1.15) {
-    if (height < 520) {
-      // Compact mobile landscape: widen vertical FOV and pull back slightly so top & bottom fit cleanly
-      const fov = mode === 'overview' ? 44 : 42;
-      const position =
-        mode === 'overview'
-          ? new THREE.Vector3(0.18, 1.56, 0.84)
-          : new THREE.Vector3(-0.01, 1.16, 1.24);
-      const target = new THREE.Vector3(-0.015, 0.17, -0.03);
+  if (mode === 'action') {
+    const fx = actionFocus?.focusX ?? 0;
+    const fz = actionFocus?.focusZ ?? 0.16;
+    const zoomOut = actionFocus?.multiballZoomOut ?? 1.0;
+    const worldFocus = playfieldLocalToWorld({ x: fx, y: 0.014, z: fz });
+    const target = new THREE.Vector3(worldFocus.x, worldFocus.y, worldFocus.z);
+
+    if (aspect >= 1.15) {
+      const fov = height < 520 ? 37 : 34;
+      const elevRad = THREE.MathUtils.degToRad(height < 520 ? 47 : 44);
+      const dist = (height < 520 ? 1.06 : 0.96) * zoomOut;
+      const position = new THREE.Vector3(
+        target.x * 0.65,
+        target.y + Math.sin(elevRad) * dist,
+        target.z + Math.cos(elevRad) * dist,
+      );
       return { fov, position, target };
     }
 
-    const base = mode === 'overview' ? OVERVIEW_POSE : PLAYER_POSE;
+    const fov = THREE.MathUtils.clamp(38 + (0.6 - aspect) * 8, 38, 41);
+    const vFovRad = THREE.MathUtils.degToRad(fov);
+    const tanHalfH = Math.max(Math.tan(vFovRad * 0.5) * aspect, 0.13);
+    // Frame 0.495 m width edge-to-edge at the focus plane (~48% larger scale than Classic!)
+    const dist = THREE.MathUtils.clamp((0.248 / tanHalfH) * zoomOut, 1.18, 1.62);
+    const elevRad = THREE.MathUtils.degToRad(50);
+    const position = new THREE.Vector3(
+      target.x * 0.55,
+      target.y + Math.sin(elevRad) * dist,
+      target.z + Math.cos(elevRad) * dist,
+    );
+    return { fov, position, target };
+  }
+
+  if (mode === 'top') {
+    const fov = aspect < 1.0 ? 40 : 38;
+    const vFovRad = THREE.MathUtils.degToRad(fov);
+    const tanHalfV = Math.tan(vFovRad * 0.5);
+    const tanHalfH = Math.max(tanHalfV * aspect, 0.13);
+    // Fit full 1.12 m length vertically and 0.57 m width horizontally with zero horizontal skew
+    const distForHeight = 0.58 / tanHalfV;
+    const distForWidth = 0.285 / tanHalfH;
+    const dist = Math.max(distForHeight, distForWidth);
+    const elevRad = THREE.MathUtils.degToRad(79);
+    const centerWorld = playfieldLocalToWorld({ x: 0, y: 0.01, z: -0.015 });
+    const target = new THREE.Vector3(0, centerWorld.y, centerWorld.z);
+    const position = new THREE.Vector3(
+      0,
+      target.y + Math.sin(elevRad) * dist,
+      target.z + Math.cos(elevRad) * dist,
+    );
+    return { fov, position, target };
+  }
+
+  // 'classic' mode — symmetrical centered arcade cabinet perspective
+  if (aspect >= 1.15) {
+    if (height < 520) {
+      const fov = 41;
+      const position = new THREE.Vector3(0, 1.15, 1.22);
+      const target = new THREE.Vector3(0, 0.17, -0.03);
+      return { fov, position, target };
+    }
+
     return {
       fov: 38,
-      position: base.position.clone(),
-      target: base.target.clone(),
+      position: PLAYER_POSE.position.clone(),
+      target: PLAYER_POSE.target.clone(),
     };
   }
 
-  // Portrait / narrow tablet & mobile viewports (e.g., 390x844, 412x915, 9:16)
-  const fov = THREE.MathUtils.clamp(39 + (1.05 - aspect) * 12, 39, 46);
+  const fov = THREE.MathUtils.clamp(39 + (1.05 - aspect) * 11, 39, 45);
   const vFovRad = THREE.MathUtils.degToRad(fov);
   const tanHalfH = Math.tan(vFovRad * 0.5) * aspect;
-  // Require 0.62 m total width (0.555 m cabinet + comfortable margins) at the front flipper/lockdown plane
-  const requiredFrontDist = 0.31 / Math.max(tanHalfH, 0.12);
-  const elevDeg = mode === 'overview' ? 66 : 56;
-  const elevRad = THREE.MathUtils.degToRad(elevDeg);
-
-  // Front edge sits ~0.55 m forward of target, so center distance adds ~0.34 m beyond front requirement
-  const centerDist = Math.max(1.42, requiredFrontDist + 0.32);
-  const target = new THREE.Vector3(-0.005, 0.15, -0.02);
+  const requiredFrontDist = 0.296 / Math.max(tanHalfH, 0.12);
+  const elevRad = THREE.MathUtils.degToRad(55);
+  const centerDist = Math.max(1.38, requiredFrontDist + 0.30);
+  const target = new THREE.Vector3(0, 0.15, -0.02);
   const position = new THREE.Vector3(
-    target.x + (mode === 'overview' ? 0.08 : 0),
+    0,
     target.y + Math.sin(elevRad) * centerDist,
     target.z + Math.cos(elevRad) * centerDist,
   );
@@ -643,7 +714,10 @@ export class PinballRenderer {
   private readonly forcedWebGL: boolean;
   private readonly webgpuAvailable: boolean;
 
-  private cameraMode: CameraMode = 'player';
+  private cameraMode: CameraMode = loadStoredCameraMode();
+  private actionFocusX = 0;
+  private actionFocusZ = 0.16;
+  private actionMultiballZoom = 1.0;
   private readonly currentCamPos = new THREE.Vector3().copy(PLAYER_POSE.position);
   private readonly currentCamTarget = new THREE.Vector3().copy(PLAYER_POSE.target);
   private targetCamPos = new THREE.Vector3().copy(PLAYER_POSE.position);
@@ -792,7 +866,7 @@ export class PinballRenderer {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x030409);
 
-    const initialPose = computeAdaptiveCameraPose(width, height, 'player');
+    const initialPose = computeAdaptiveCameraPose(width, height, loadStoredCameraMode());
     const camera = new THREE.PerspectiveCamera(initialPose.fov, width / height, 0.05, 22);
     camera.position.copy(initialPose.position);
     camera.lookAt(initialPose.target);
@@ -934,7 +1008,19 @@ export class PinballRenderer {
       this.allocatePoolBall();
     }
 
-    let primaryBall = balls[0] ?? null;
+    // Prune stale ball IDs from per-ball caches so long sessions never leak memory
+    const activeIds = new Set<number>();
+    for (const b of balls) {
+      activeIds.add(b.id);
+    }
+    for (const cachedId of this.ballPrevPositions.keys()) {
+      if (!activeIds.has(cachedId)) this.ballPrevPositions.delete(cachedId);
+    }
+    for (const cachedId of this.ballTrailHistory.keys()) {
+      if (!activeIds.has(cachedId)) this.ballTrailHistory.delete(cachedId);
+    }
+
+    let primaryBall: BallTelemetry | null = balls[0] ?? null;
     for (let i = 0; i < this.ballPool.length; i++) {
       const mesh = this.ballPool[i];
       const trailRow = this.trailMeshes[i];
@@ -1023,7 +1109,8 @@ export class PinballRenderer {
     // Update reactive lights & material emissive pulses
     this.updateLightsAndEmissive(clampedDt, elapsed, state.snapshot);
 
-    // Update camera pose & decaying micro-shake / nudge impulse
+    // Update dynamic action-cam focus & smooth camera pose + micro-shake
+    this.updateActionCameraFocus(clampedDt, primaryBall, state.snapshot);
     this.updateCamera(clampedDt);
   }
 
@@ -1043,15 +1130,25 @@ export class PinballRenderer {
     this.renderer.render(this.scene, this.camera);
   }
 
+  getCameraMode(): CameraMode {
+    return this.cameraMode;
+  }
+
   setCameraMode(mode: CameraMode): void {
     this.cameraMode = mode;
+    saveStoredCameraMode(mode);
     this.refreshAdaptiveCameraTarget();
   }
 
+  cycleCameraMode(): CameraMode {
+    const idx = CAMERA_MODES_ORDER.indexOf(this.cameraMode);
+    const next = CAMERA_MODES_ORDER[(idx + 1) % CAMERA_MODES_ORDER.length];
+    this.setCameraMode(next);
+    return next;
+  }
+
   toggleCameraMode(): CameraMode {
-    this.cameraMode = this.cameraMode === 'player' ? 'overview' : 'player';
-    this.refreshAdaptiveCameraTarget();
-    return this.cameraMode;
+    return this.cycleCameraMode();
   }
 
   dispose(): void {
@@ -1177,9 +1274,9 @@ export class PinballRenderer {
       this.bus.on('lampPulse', ({ lampId, intensity }) => {
         if (lampId === 'bumper-top' || lampId === 'bumper-left' || lampId === 'bumper-right') {
           this.bumperFlash[lampId] = Math.max(this.bumperFlash[lampId], Math.min(intensity, 1.25));
-        } else if (lampId.includes('sling-left')) {
+        } else if (lampId === 'slingshot-left' || lampId.includes('sling-left')) {
           this.slingshotLeftFlash = Math.max(this.slingshotLeftFlash, 0.9);
-        } else if (lampId.includes('sling-right')) {
+        } else if (lampId === 'slingshot-right' || lampId.includes('sling-right')) {
           this.slingshotRightFlash = Math.max(this.slingshotRightFlash, 0.9);
         } else {
           this.roseFlash = Math.max(this.roseFlash, 0.78);
@@ -1246,17 +1343,61 @@ export class PinballRenderer {
     }
   }
 
+  private updateActionCameraFocus(
+    dt: number,
+    primaryBall: BallTelemetry | null,
+    snapshot: GameStateSnapshot,
+  ): void {
+    const isMultiball = snapshot.phase === 'multiball' || snapshot.activeBalls >= 2;
+    const desiredZoom = isMultiball ? 1.16 : 1.0;
+
+    let desiredX = 0;
+    let desiredZ = 0.16;
+
+    if (isMultiball) {
+      desiredX = 0;
+      desiredZ = 0.15;
+    } else if (primaryBall && !primaryBall.locked) {
+      if (primaryBall.inPlungerLane) {
+        desiredX = 0.04;
+        desiredZ = 0.18;
+      } else {
+        desiredX = THREE.MathUtils.clamp(primaryBall.position.x * 0.25, -0.045, 0.045);
+        desiredZ = THREE.MathUtils.clamp(primaryBall.position.z * 0.72 + 0.04, -0.24, 0.25);
+      }
+    }
+
+    // Track downward ball drops faster than upward climbs so flippers are always framed in time
+    const zRate = desiredZ > this.actionFocusZ ? 8.5 : 4.2;
+    const alphaZ = dt > 0 ? 1 - Math.exp(-zRate * dt) : 1;
+    const alphaX = dt > 0 ? 1 - Math.exp(-5.0 * dt) : 1;
+    const alphaZoom = dt > 0 ? 1 - Math.exp(-3.5 * dt) : 1;
+
+    this.actionFocusX += (desiredX - this.actionFocusX) * alphaX;
+    this.actionFocusZ += (desiredZ - this.actionFocusZ) * alphaZ;
+    this.actionMultiballZoom += (desiredZoom - this.actionMultiballZoom) * alphaZoom;
+
+    if (this.cameraMode === 'action') {
+      this.refreshAdaptiveCameraTarget();
+    }
+  }
+
   private refreshAdaptiveCameraTarget(): void {
     const width = Math.max(this.container.clientWidth || window.innerWidth, 1);
     const height = Math.max(this.container.clientHeight || window.innerHeight, 1);
-    const pose = computeAdaptiveCameraPose(width, height, this.cameraMode);
+    const pose = computeAdaptiveCameraPose(width, height, this.cameraMode, {
+      focusX: this.actionFocusX,
+      focusZ: this.actionFocusZ,
+      multiballZoomOut: this.actionMultiballZoom,
+    });
     this.targetCamFov = pose.fov;
     this.targetCamPos.copy(pose.position);
     this.targetCamTarget.copy(pose.target);
   }
 
   private updateCamera(dt: number): void {
-    const lerpFactor = dt > 0 ? 1 - Math.exp(-10 * dt) : 1;
+    const lerpSpeed = this.cameraMode === 'action' ? 12 : 9;
+    const lerpFactor = dt > 0 ? 1 - Math.exp(-lerpSpeed * dt) : 1;
 
     this.currentCamPos.lerp(this.targetCamPos, lerpFactor);
     this.currentCamTarget.lerp(this.targetCamTarget, lerpFactor);
@@ -1281,7 +1422,11 @@ export class PinballRenderer {
     if (this.disposed) return;
     const width = Math.max(this.container.clientWidth || window.innerWidth, 1);
     const height = Math.max(this.container.clientHeight || window.innerHeight, 1);
-    const pose = computeAdaptiveCameraPose(width, height, this.cameraMode);
+    const pose = computeAdaptiveCameraPose(width, height, this.cameraMode, {
+      focusX: this.actionFocusX,
+      focusZ: this.actionFocusZ,
+      multiballZoomOut: this.actionMultiballZoom,
+    });
     this.targetCamFov = pose.fov;
     this.targetCamPos.copy(pose.position);
     this.targetCamTarget.copy(pose.target);

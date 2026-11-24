@@ -606,6 +606,54 @@ async function verifyMobileViewport(browser, config) {
         throw new Error(`${name}: iOS zoom guards did not prevent defaults (${JSON.stringify(zoomGuards)})`);
       }
 
+      // Verify large sculpted Nudge button dimensions (>= 54x58 px on iPhone)
+      const nudgeBox = await page.locator('.cp-nudge-btn').boundingBox();
+      if (!nudgeBox || nudgeBox.width < 54 || nudgeBox.height < 58) {
+        throw new Error(`${name}: expected large sculpted Nudge button, got ${JSON.stringify(nudgeBox)}`);
+      }
+
+      // Verify 3-mode AAA camera cycle (classic -> action -> top -> classic) & capture visual proofs
+      const mode0 = await page.evaluate(() => window.__PINBALL_DEBUG__.getCameraMode());
+      if (mode0 !== 'classic') {
+        throw new Error(`${name}: expected default classic camera mode, got ${mode0}`);
+      }
+      const mode1 = await page.evaluate(() => window.__PINBALL_DEBUG__.cycleCameraMode());
+      if (mode1 !== 'action') {
+        throw new Error(`${name}: expected action camera mode, got ${mode1}`);
+      }
+      await page.waitForTimeout(450);
+      await page.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_iphone_action_cam.png') });
+
+      const mode2 = await page.evaluate(() => window.__PINBALL_DEBUG__.cycleCameraMode());
+      if (mode2 !== 'top') {
+        throw new Error(`${name}: expected top camera mode, got ${mode2}`);
+      }
+      await page.waitForTimeout(450);
+      await page.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_iphone_top_cam.png') });
+
+      const mode3 = await page.evaluate(() => window.__PINBALL_DEBUG__.cycleCameraMode());
+      if (mode3 !== 'classic') {
+        throw new Error(`${name}: expected camera cycle back to classic, got ${mode3}`);
+      }
+      await page.waitForTimeout(350);
+
+      // Verify local High Score Leaderboard modal & persistence
+      const lbEntries = await page.evaluate(() => window.__PINBALL_DEBUG__.getLeaderboard());
+      if (!Array.isArray(lbEntries) || lbEntries.length < 5) {
+        throw new Error(`${name}: expected seeded local leaderboard >= 5 entries, got ${JSON.stringify(lbEntries)}`);
+      }
+      await page.locator('.cp-btn-gold').click();
+      await page.waitForTimeout(180);
+      const modalOpen = await page.evaluate(() =>
+        Boolean(document.querySelector('.cp-modal-backdrop.open')),
+      );
+      if (!modalOpen) {
+        throw new Error(`${name}: clicking Top button did not open leaderboard modal`);
+      }
+      await page.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_iphone_leaderboard.png') });
+      await page.locator('.cp-modal-actions .cp-btn:not(.cp-btn-primary)').click();
+      await page.waitForTimeout(150);
+
       dragPlungerVerified = true;
     }
 

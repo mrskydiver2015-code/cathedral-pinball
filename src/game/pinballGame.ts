@@ -1,3 +1,7 @@
+import {
+  HighScoreStore,
+  type RecordedHighScoreResult,
+} from './highScores.ts';
 import { PinballPhysicsWorld, type PhysicsFrameData } from '../physics/pinballPhysics.ts';
 import type { PinballEventBus } from '../shared/events.ts';
 import { TABLE_SPEC } from '../shared/tableSpec.ts';
@@ -8,33 +12,12 @@ import type {
   Side,
 } from '../shared/types.ts';
 
-const HIGH_SCORE_STORAGE_KEY = 'cathedral-pinball-high-score';
 const DROP_TARGET_RESET_DELAY_SEC = 0.85;
 const TILT_WARNING_DECAY_SEC = 10.0;
 const BALL_SAVE_DURATION_SEC = 12.0;
 const MULTIBALL_SAVE_DURATION_SEC = 8.0;
 const SKILL_SHOT_WINDOW_SEC = 4.8;
 const COMBO_WINDOW_SEC = 4.0;
-
-function loadStoredHighScore(): number {
-  try {
-    if (typeof window === 'undefined' || !window.localStorage) return 0;
-    const raw = window.localStorage.getItem(HIGH_SCORE_STORAGE_KEY);
-    const parsed = raw ? Number(raw) : 0;
-    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function saveStoredHighScore(score: number): void {
-  try {
-    if (typeof window === 'undefined' || !window.localStorage) return;
-    window.localStorage.setItem(HIGH_SCORE_STORAGE_KEY, String(Math.floor(score)));
-  } catch {
-    // Ignore storage quota or sandbox restrictions
-  }
-}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
@@ -47,14 +30,17 @@ function clamp(value: number, min: number, max: number): number {
 export class PinballGameController {
   private readonly bus: PinballEventBus;
   private readonly physics: PinballPhysicsWorld;
+  private readonly highScores = new HighScoreStore();
   private readonly unsubscribers: (() => void)[] = [];
 
   private phase: GamePhase = 'attract';
   private score = 0;
-  private highScore = loadStoredHighScore();
+  private highScore: number;
   private ballNumber = 1;
   private lockedBalls = 0;
   private multiplier = 1;
+  private maxMultiplierReached = 1;
+  private lastGameOverRecord: RecordedHighScoreResult | null = null;
   private tiltWarnings = 0;
   private tilted = false;
   private plungerCharge = 0;
@@ -83,6 +69,7 @@ export class PinballGameController {
     }) => PinballPhysicsWorld,
   ) {
     this.bus = bus;
+    this.highScore = this.highScores.getTopScore();
     this.physics = physicsFactory({
       onBallDrain: (ballId, activeRemaining) => this.handleBallDrain(ballId, activeRemaining),
       onMultiballLockHit: (ballId) => this.handleMultiballLockHit(ballId),
@@ -131,6 +118,7 @@ export class PinballGameController {
         if (!this.canScore()) return;
         if (payload.bankComplete) {
           this.multiplier = Math.min(TABLE_SPEC.rules.maxMultiplier, this.multiplier + 1);
+          this.maxMultiplierReached = Math.max(this.maxMultiplierReached, this.multiplier);
           this.dropTargetResetTimerSec = DROP_TARGET_RESET_DELAY_SEC;
         }
         this.registerCombo(payload.bankComplete ? 'TARGET BANK!' : 'TARGET');
@@ -142,6 +130,7 @@ export class PinballGameController {
       this.bus.on('rampCompleted', (payload) => {
         if (!this.canScore()) return;
         this.multiplier = Math.min(TABLE_SPEC.rules.maxMultiplier, this.multiplier + 1);
+        this.maxMultiplierReached = Math.max(this.maxMultiplierReached, this.multiplier);
         this.registerCombo('RAMP COMBO!');
         this.addScore(payload.points, `ramp:${payload.rampId}`);
       }),
@@ -181,7 +170,6 @@ export class PinballGameController {
     this.score += delta;
     if (this.score > this.highScore) {
       this.highScore = this.score;
-      saveStoredHighScore(this.highScore);
     }
     this.bus.emit('scoreDelta', {
       delta,
@@ -209,9 +197,12 @@ export class PinballGameController {
     this.physics.resetWorld();
 
     this.score = 0;
+    this.highScore = this.highScores.getTopScore();
     this.ballNumber = 1;
     this.lockedBalls = 0;
     this.multiplier = 1;
+    this.maxMultiplierReached = 1;
+    this.lastGameOverRecord = null;
     this.tiltWarnings = 0;
     this.tilted = false;
     this.plungerCharge = 0;
@@ -416,6 +407,7 @@ export class PinballGameController {
       this.skillShotWindowSec = 0;
       const skillPoints = laneIndex === 1 ? 2500 : 1500;
       this.multiplier = Math.min(TABLE_SPEC.rules.maxMultiplier, this.multiplier + 1);
+      this.maxMultiplierReached = Math.max(this.maxMultiplierReached, this.multiplier);
       this.bus.emit('rolloverHit', { laneIndex, skillShot: true, points: skillPoints });
       this.bus.emit('lampPulse', {
         lampId: `rollover-${laneIndex}`,
@@ -433,6 +425,7 @@ export class PinballGameController {
     if (allLit) {
       this.rolloverLanesLit = [false, false, false];
       this.multiplier = Math.min(TABLE_SPEC.rules.maxMultiplier, this.multiplier + 1);
+      this.maxMultiplierReached = Math.max(this.maxMultiplierReached, this.multiplier);
       points += 1500;
     }
 
@@ -574,7 +567,23 @@ export class PinballGameController {
     this.rightFlipperActive = false;
     this.physics.setFlipperInput('left', false);
     this.physics.setFlipperInput('right', false);
+    this.physics.clearLockedBalls();
+    this.lockedBalls = 0;
+    this.lastGameOverRecord = this.highScores.recordScore(
+      this.score,
+      undefined,
+      this.maxMultiplierReached,
+    );
+    this.highScore = Math.max(this.highScore, this.highScores.getTopScore());
     this.transitionPhase('gameOver');
+  }
+
+  getHighScoreStore(): HighScoreStore {
+    return this.highScores;
+  }
+
+  getLastGameOverRecord(): RecordedHighScoreResult | null {
+    return this.lastGameOverRecord;
   }
 
   update(dtSeconds: number): { snapshot: GameStateSnapshot; physics: PhysicsFrameData } {

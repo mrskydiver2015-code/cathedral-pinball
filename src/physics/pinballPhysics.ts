@@ -989,9 +989,32 @@ export class PinballPhysicsWorld {
     if (this.disposed) return -1;
     this.resetPlungerTipToRest(true);
     const { ballSpawnLocal } = TABLE_SPEC.plungerLane;
+
+    // Prevent overlapping duplicate spawns if an unlocked ball is already resting in the plunger lane
+    for (const existing of this.balls.values()) {
+      if (existing.locked) continue;
+      const pos = existing.body.translation();
+      if (this.isInPlungerLane(pos) && pos.z >= 0.22) {
+        existing.body.setTranslation(ballSpawnLocal, true);
+        existing.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+        existing.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+        existing.body.wakeUp();
+        return existing.id;
+      }
+    }
+
     const id = this.createBall(ballSpawnLocal);
     this.bus.emit('ballSpawn', { ballId: id, inPlungerLane: true });
     return id;
+  }
+
+  clearLockedBalls(): void {
+    if (this.disposed) return;
+    for (const [id, ball] of [...this.balls.entries()]) {
+      if (ball.locked) {
+        this.removeBall(id);
+      }
+    }
   }
 
   spawnMultiballWave(count: number): void {
@@ -1510,6 +1533,9 @@ export class PinballPhysicsWorld {
 
   private handleRampEnter(ball: BallRecord): void {
     if (ball.onRamp || ball.rampCooldownSec > 0) return;
+    const entryVel = ball.body.linvel();
+    // Ignore fast upfield orbit shots grazing the ramp mouth from below
+    if (entryVel.z < -0.85) return;
 
     ball.onRamp = true;
     ball.onRampElapsedSec = 0;
