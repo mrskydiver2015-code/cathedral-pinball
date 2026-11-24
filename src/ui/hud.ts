@@ -369,9 +369,10 @@ const HUD_STYLES = `
 .cp-nudge-btn {
   position: absolute;
   left: calc(14px + env(safe-area-inset-left));
-  bottom: calc(48px + env(safe-area-inset-bottom));
+  bottom: 40%;
+  transform: translateY(50%);
   pointer-events: auto;
-  padding: 10px 12px;
+  padding: 9px 11px;
   border-radius: 11px;
   font-size: 11px;
   font-weight: 800;
@@ -381,6 +382,10 @@ const HUD_STYLES = `
   background: rgba(12, 16, 36, 0.78);
   border: 1px solid rgba(251, 191, 36, 0.35);
   touch-action: none;
+}
+
+.cp-nudge-btn:active {
+  transform: translateY(calc(50% + 1px));
 }
 
 .cp-flipper-edge {
@@ -498,9 +503,9 @@ const HUD_STYLES = `
     height: 82px;
   }
   .cp-nudge-btn {
-    bottom: calc(44px + env(safe-area-inset-bottom));
-    left: calc(8px + env(safe-area-inset-left));
-    padding: 8px 10px;
+    bottom: 40%;
+    left: calc(6px + env(safe-area-inset-left));
+    padding: 7px 9px;
     font-size: 10px;
   }
 }
@@ -530,8 +535,8 @@ const HUD_STYLES = `
     bottom: calc(38px + env(safe-area-inset-bottom));
   }
   .cp-nudge-btn {
-    bottom: calc(38px + env(safe-area-inset-bottom));
-    padding: 7px 10px;
+    bottom: 40%;
+    padding: 7px 9px;
   }
 }
 `;
