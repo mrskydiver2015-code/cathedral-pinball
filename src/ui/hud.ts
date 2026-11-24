@@ -555,6 +555,7 @@ export class PinballHud {
   private readonly callbacks: HudCallbacks;
   private readonly root: HTMLDivElement;
   private readonly unsubscribers: Array<() => void> = [];
+  private readonly domCleanups: Array<() => void> = [];
 
   private readonly backendBadge: HTMLSpanElement;
   private readonly scoreValue: HTMLDivElement;
@@ -762,8 +763,16 @@ export class PinballHud {
     nudgeBtn.className = 'cp-btn cp-nudge-btn';
     nudgeBtn.dataset.uiControl = 'true';
     nudgeBtn.textContent = 'Nudge';
+    nudgeBtn.addEventListener(
+      'touchstart',
+      (e) => {
+        e.preventDefault();
+      },
+      { passive: false },
+    );
     nudgeBtn.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
+      e.preventDefault();
       this.callbacks.onNudge();
     });
 
@@ -799,13 +808,18 @@ export class PinballHud {
   }
 
   private bindTouchPlunger(plungerWrap: HTMLDivElement): void {
-    plungerWrap.addEventListener('pointerdown', (e: PointerEvent) => {
+    const onTouchStart = (e: TouchEvent): void => {
+      e.preventDefault();
+    };
+    plungerWrap.addEventListener('touchstart', onTouchStart, { passive: false });
+
+    const onPointerDown = (e: PointerEvent): void => {
       e.stopPropagation();
       e.preventDefault();
       this.plungerDragPointerId = e.pointerId;
       this.plungerDragStartY = e.clientY;
       this.plungerDidDrag = false;
-      this.plungerCurrentRatio = 0.25;
+      this.plungerCurrentRatio = 0.35;
       plungerWrap.classList.add('dragging');
       try {
         plungerWrap.setPointerCapture(e.pointerId);
@@ -813,19 +827,21 @@ export class PinballHud {
         // Ignore synthetic pointer capture rejection
       }
       this.callbacks.onPlungerDrag(this.plungerCurrentRatio);
-    });
+    };
 
-    plungerWrap.addEventListener('pointermove', (e: PointerEvent) => {
+    const onPointerMove = (e: PointerEvent): void => {
       if (this.plungerDragPointerId !== e.pointerId) return;
       e.stopPropagation();
       const dy = e.clientY - this.plungerDragStartY;
       if (Math.abs(dy) > 4) {
         this.plungerDidDrag = true;
       }
-      const ratio = Math.max(0.1, Math.min(1, 0.2 + dy / 76));
+      // Support both downward pull (classic plunger) and upward flick swipe
+      const pullMagnitude = dy >= 0 ? dy : Math.abs(dy) * 0.9;
+      const ratio = Math.max(0.25, Math.min(1, 0.25 + pullMagnitude / 72));
       this.plungerCurrentRatio = ratio;
       this.callbacks.onPlungerDrag(ratio);
-    });
+    };
 
     const releaseDrag = (e: PointerEvent): void => {
       if (this.plungerDragPointerId !== e.pointerId) return;
@@ -840,13 +856,23 @@ export class PinballHud {
         // Ignore synthetic release errors
       }
       const releaseStrength = this.plungerDidDrag
-        ? Math.max(0.25, this.plungerCurrentRatio)
+        ? Math.max(0.4, this.plungerCurrentRatio)
         : 0.85;
       this.callbacks.onPlungerRelease(releaseStrength);
     };
 
-    plungerWrap.addEventListener('pointerup', releaseDrag);
-    plungerWrap.addEventListener('pointercancel', releaseDrag);
+    plungerWrap.addEventListener('pointerdown', onPointerDown);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', releaseDrag);
+    window.addEventListener('pointercancel', releaseDrag);
+
+    this.domCleanups.push(() => {
+      plungerWrap.removeEventListener('touchstart', onTouchStart);
+      plungerWrap.removeEventListener('pointerdown', onPointerDown);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', releaseDrag);
+      window.removeEventListener('pointercancel', releaseDrag);
+    });
   }
 
   update(snapshot: GameStateSnapshot, capabilities: RendererCapabilities): void {
@@ -943,6 +969,11 @@ export class PinballHud {
       unsub();
     }
     this.unsubscribers.length = 0;
+
+    for (const cleanup of this.domCleanups) {
+      cleanup();
+    }
+    this.domCleanups.length = 0;
 
     if (this.calloutTimer !== null) {
       window.clearTimeout(this.calloutTimer);

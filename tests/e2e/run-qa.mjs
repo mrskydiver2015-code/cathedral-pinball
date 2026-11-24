@@ -536,6 +536,76 @@ async function verifyMobileViewport(browser, config) {
       if (afterLaunch <= beforeLaunch) {
         throw new Error(`${name}: touch-drag plunger did not trigger plungerRelease`);
       }
+
+      // Regression test: hold plunger pulled fully back for 1000 ms (gravity rolls ball down),
+      // release off-element on window, and verify the ball cleanly exits the plunger lane.
+      await page.evaluate(() => {
+        window.__PINBALL_DEBUG__.resetGame();
+        const plunger = document.querySelector('.cp-plunger-wrap');
+        if (!plunger) throw new Error('Missing touch plunger widget');
+        const r = plunger.getBoundingClientRect();
+        const cx = r.left + r.width * 0.5;
+        const startY = r.top + 16;
+        plunger.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            bubbles: true,
+            pointerId: 602,
+            pointerType: 'touch',
+            clientX: cx,
+            clientY: startY,
+          }),
+        );
+        window.dispatchEvent(
+          new PointerEvent('pointermove', {
+            bubbles: true,
+            pointerId: 602,
+            pointerType: 'touch',
+            clientX: cx,
+            clientY: startY + 72,
+          }),
+        );
+      });
+      await page.waitForTimeout(1000);
+      await page.evaluate(() => {
+        window.dispatchEvent(
+          new PointerEvent('pointerup', {
+            bubbles: true,
+            pointerId: 602,
+            pointerType: 'touch',
+            clientX: 360,
+            clientY: 820,
+          }),
+        );
+      });
+      await page.waitForTimeout(850);
+      const afterHoldSnap = await page.evaluate(() => window.__PINBALL_DEBUG__.getSnapshot());
+      const activeAfterHold = afterHoldSnap.balls.filter((b) => !b.locked);
+      if (activeAfterHold.length === 0 || activeAfterHold.every((b) => b.inPlungerLane)) {
+        throw new Error(
+          `${name}: 1s held plunger shot remained trapped in plunger lane (${JSON.stringify(activeAfterHold)})`,
+        );
+      }
+
+      // Verify iOS Safari zoom guards prevent dblclick & touchmove default while HUD buttons remain clickable
+      const zoomGuards = await page.evaluate(() => {
+        const app = document.querySelector('#app');
+        if (!app) throw new Error('Missing #app');
+        const dblEv = new MouseEvent('dblclick', { bubbles: true, cancelable: true });
+        app.dispatchEvent(dblEv);
+        const moveEv = new Event('touchmove', { bubbles: true, cancelable: true });
+        app.dispatchEvent(moveEv);
+        const gestEv = new Event('gesturestart', { bubbles: true, cancelable: true });
+        document.dispatchEvent(gestEv);
+        return {
+          dblPrevented: dblEv.defaultPrevented,
+          movePrevented: moveEv.defaultPrevented,
+          gesturePrevented: gestEv.defaultPrevented,
+        };
+      });
+      if (!zoomGuards.dblPrevented || !zoomGuards.movePrevented || !zoomGuards.gesturePrevented) {
+        throw new Error(`${name}: iOS zoom guards did not prevent defaults (${JSON.stringify(zoomGuards)})`);
+      }
+
       dragPlungerVerified = true;
     }
 

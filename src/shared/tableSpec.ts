@@ -173,8 +173,8 @@ export const TABLE_SPEC = {
       z: 0.455,
     } satisfies Vec3,
     maxPullM: 0.07,
-    minLaunchSpeedMps: 1.6,
-    maxLaunchSpeedMps: 4.4,
+    minLaunchSpeedMps: 2.65,
+    maxLaunchSpeedMps: 4.55,
   },
 
   ball: {

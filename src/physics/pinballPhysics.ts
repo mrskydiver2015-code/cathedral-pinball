@@ -80,7 +80,8 @@ const GROUPS_BALL_ON_RAMP = makeInteractionGroups(GROUP_RAMP, GROUP_RAMP | GROUP
 const MAX_BALL_SPEED_MPS = 5.8;
 const PLUNGER_CHARGE_RATE_PER_SEC = 1.15;
 const PLUNGER_REST_Z = 0.472;
-const PLUNGER_TIP_HALF_DEPTH = 0.015;
+const PLUNGER_TIP_HALF_DEPTH = 0.06;
+const PLUNGER_MAX_PHYSICAL_PULL_M = 0.036;
 const GLASS_CEILING_BOTTOM_Y = 0.097;
 const GLASS_CEILING_HALF_Y = 0.008;
 
@@ -834,18 +835,28 @@ export class PinballPhysicsWorld {
     }
   }
 
+  private resetPlungerTipToRest(snap = true): void {
+    this.plungerCharging = false;
+    this.plungerChargeRatio = 0;
+    this.plungerPullM = 0;
+    const restPos = {
+      x: TABLE_SPEC.plungerLane.centerX,
+      y: TABLE_SPEC.ball.radius,
+      z: PLUNGER_REST_Z + PLUNGER_TIP_HALF_DEPTH,
+    };
+    if (snap) {
+      this.plungerTipBody.setTranslation(restPos, false);
+    }
+    this.plungerTipBody.setNextKinematicTranslation(restPos);
+  }
+
   setPlungerCharging(charging: boolean): void {
     if (this.disposed) return;
-    this.plungerCharging = charging;
     if (!charging) {
-      this.plungerChargeRatio = 0;
-      this.plungerPullM = 0;
-      this.plungerTipBody.setNextKinematicTranslation({
-        x: TABLE_SPEC.plungerLane.centerX,
-        y: TABLE_SPEC.ball.radius,
-        z: PLUNGER_REST_Z + PLUNGER_TIP_HALF_DEPTH,
-      });
+      this.resetPlungerTipToRest(true);
+      return;
     }
+    this.plungerCharging = true;
   }
 
   setManualPlungerCharge(ratio: number): void {
@@ -856,10 +867,11 @@ export class PinballPhysicsWorld {
     this.plungerCharging = false;
     this.plungerChargeRatio = clamped;
     this.plungerPullM = clamped * TABLE_SPEC.plungerLane.maxPullM;
+    const tipPullM = clamped * PLUNGER_MAX_PHYSICAL_PULL_M;
     this.plungerTipBody.setNextKinematicTranslation({
       x: TABLE_SPEC.plungerLane.centerX,
       y: TABLE_SPEC.ball.radius,
-      z: PLUNGER_REST_Z + PLUNGER_TIP_HALF_DEPTH + this.plungerPullM,
+      z: PLUNGER_REST_Z + PLUNGER_TIP_HALF_DEPTH + tipPullM,
     });
     if (nextStep !== prevStep) {
       this.bus.emit('plungerCharge', {
@@ -878,11 +890,15 @@ export class PinballPhysicsWorld {
     let rescued = 0;
     const slowBalls: BallRecord[] = [];
     const activeNonPlunger: BallRecord[] = [];
+    const plungerBalls: BallRecord[] = [];
 
     for (const ball of this.balls.values()) {
       if (ball.locked) continue;
       const pos = ball.body.translation();
-      if (this.isInPlungerLane(pos)) continue;
+      if (this.isInPlungerLane(pos)) {
+        plungerBalls.push(ball);
+        continue;
+      }
       activeNonPlunger.push(ball);
       const vel = ball.body.linvel();
       if (Math.hypot(vel.x, vel.y, vel.z) < 0.25) {
@@ -895,34 +911,47 @@ export class PinballPhysicsWorld {
       this.applyRescueImpulse(ball, true);
       rescued += 1;
     }
+
+    if (rescued === 0 && plungerBalls.length > 0) {
+      this.launchPlunger(0.85);
+      for (const ball of plungerBalls) {
+        const pos = ball.body.translation();
+        this.bus.emit('ballRescue', {
+          ballId: ball.id,
+          manual: true,
+          position: { x: pos.x, y: pos.y, z: pos.z },
+        });
+        rescued += 1;
+      }
+    }
+
     return rescued;
   }
 
   launchPlunger(chargeRatio: number): void {
     if (this.disposed) return;
     const ratio = clamp(Number.isFinite(chargeRatio) ? chargeRatio : 0.5, 0.05, 1);
-    const { plungerLane } = TABLE_SPEC;
+    const { plungerLane, ball: ballSpec } = TABLE_SPEC;
     const launchSpeed =
       plungerLane.minLaunchSpeedMps +
       (plungerLane.maxLaunchSpeedMps - plungerLane.minLaunchSpeedMps) * ratio;
 
-    this.plungerCharging = false;
-    this.plungerChargeRatio = 0;
-    this.plungerPullM = 0;
-    this.plungerTipBody.setNextKinematicTranslation({
-      x: plungerLane.centerX,
-      y: TABLE_SPEC.ball.radius,
-      z: PLUNGER_REST_Z + PLUNGER_TIP_HALF_DEPTH,
-    });
-
+    const launchSafeZ = PLUNGER_REST_Z - ballSpec.radius - 0.002;
     for (const ball of this.balls.values()) {
       if (ball.locked) continue;
       const pos = ball.body.translation();
-      if (this.isInPlungerLane(pos) && pos.z >= 0.25) {
+      if (this.isInPlungerLane(pos) && pos.z >= 0.18) {
+        const safeZ = Math.min(pos.z, launchSafeZ);
+        ball.body.setTranslation(
+          { x: plungerLane.centerX, y: ballSpec.radius, z: safeZ },
+          true,
+        );
         ball.body.setLinvel({ x: 0, y: 0, z: -launchSpeed }, true);
         ball.body.wakeUp();
       }
     }
+
+    this.resetPlungerTipToRest(true);
 
     this.bus.emit('plungerRelease', {
       ratio,
@@ -946,6 +975,7 @@ export class PinballPhysicsWorld {
 
   spawnBallInPlungerLane(): number {
     if (this.disposed) return -1;
+    this.resetPlungerTipToRest(true);
     const { ballSpawnLocal } = TABLE_SPEC.plungerLane;
     const id = this.createBall(ballSpawnLocal);
     this.bus.emit('ballSpawn', { ballId: id, inPlungerLane: true });
@@ -1117,10 +1147,11 @@ export class PinballPhysicsWorld {
         1,
       );
       this.plungerPullM = this.plungerChargeRatio * TABLE_SPEC.plungerLane.maxPullM;
+      const tipPullM = this.plungerChargeRatio * PLUNGER_MAX_PHYSICAL_PULL_M;
       this.plungerTipBody.setNextKinematicTranslation({
         x: TABLE_SPEC.plungerLane.centerX,
         y: TABLE_SPEC.ball.radius,
-        z: PLUNGER_REST_Z + PLUNGER_TIP_HALF_DEPTH + this.plungerPullM,
+        z: PLUNGER_REST_Z + PLUNGER_TIP_HALF_DEPTH + tipPullM,
       });
       this.plungerEmitAccumSec += dt;
       if (this.plungerEmitAccumSec >= 0.04) {
@@ -1545,8 +1576,23 @@ export class PinballPhysicsWorld {
         speed = MAX_BALL_SPEED_MPS;
       }
 
-      // Continuous anti-stall watchdog: rescue any active non-plunger ball < 0.03 m/s for > 1.5 s
+      // Plunger safety invariant: never allow a ball to end up behind the resting plunger tip
       const activePos = ball.body.translation();
+      const plungerSafeZ = PLUNGER_REST_Z - ballSpec.radius - 0.002;
+      if (
+        this.plungerPullM === 0 &&
+        this.isInPlungerLane(activePos) &&
+        activePos.z > plungerSafeZ + 0.006
+      ) {
+        ball.body.setTranslation(
+          { x: plungerLane.centerX, y: ballSpec.radius, z: plungerSafeZ },
+          true,
+        );
+        ball.body.setLinvel({ x: 0, y: 0, z: Math.min(vel.z, 0) }, true);
+        ball.body.wakeUp();
+      }
+
+      // Continuous anti-stall watchdog: rescue any active non-plunger ball < 0.03 m/s for > 1.5 s
       if (!this.isInPlungerLane(activePos) && speed < 0.03) {
         ball.lowSpeedSec += dt;
         if (ball.lowSpeedSec > 1.5) {

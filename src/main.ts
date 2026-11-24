@@ -146,6 +146,32 @@ function bindControls(params: {
     }
   };
 
+  // Prevent iOS Safari pinch-to-zoom, double-tap zoom, and page rubber-band pan
+  // (iOS Safari ignores viewport user-scalable=no during multi-touch & rapid flipper taps)
+  let lastTouchEndMs = 0;
+  const preventGestureZoom = (event: Event): void => {
+    event.preventDefault();
+  };
+  const onDocumentTouchStart = (event: TouchEvent): void => {
+    audio.unlock();
+    if (event.touches.length > 1 || !isInteractiveUiTarget(event.target)) {
+      event.preventDefault();
+    }
+  };
+  const onDocumentTouchMove = (event: TouchEvent): void => {
+    event.preventDefault();
+  };
+  const onDocumentTouchEnd = (event: TouchEvent): void => {
+    const now = performance.now();
+    if (now - lastTouchEndMs < 350 && !isInteractiveUiTarget(event.target)) {
+      event.preventDefault();
+    }
+    lastTouchEndMs = now;
+  };
+  const onDocumentDblClick = (event: MouseEvent): void => {
+    event.preventDefault();
+  };
+
   const onBlur = (): void => {
     keyLeft.clear();
     keyRight.clear();
@@ -164,6 +190,13 @@ function bindControls(params: {
   window.addEventListener('pointerup', releasePointer);
   window.addEventListener('pointercancel', releasePointer);
   window.addEventListener('blur', onBlur);
+  document.addEventListener('gesturestart', preventGestureZoom, { passive: false });
+  document.addEventListener('gesturechange', preventGestureZoom, { passive: false });
+  document.addEventListener('gestureend', preventGestureZoom, { passive: false });
+  document.addEventListener('touchstart', onDocumentTouchStart, { passive: false });
+  document.addEventListener('touchmove', onDocumentTouchMove, { passive: false });
+  document.addEventListener('touchend', onDocumentTouchEnd, { passive: false });
+  document.addEventListener('dblclick', onDocumentDblClick, { passive: false });
 
   return () => {
     window.removeEventListener('keydown', onKeyDown);
@@ -172,6 +205,13 @@ function bindControls(params: {
     window.removeEventListener('pointerup', releasePointer);
     window.removeEventListener('pointercancel', releasePointer);
     window.removeEventListener('blur', onBlur);
+    document.removeEventListener('gesturestart', preventGestureZoom);
+    document.removeEventListener('gesturechange', preventGestureZoom);
+    document.removeEventListener('gestureend', preventGestureZoom);
+    document.removeEventListener('touchstart', onDocumentTouchStart);
+    document.removeEventListener('touchmove', onDocumentTouchMove);
+    document.removeEventListener('touchend', onDocumentTouchEnd);
+    document.removeEventListener('dblclick', onDocumentDblClick);
   };
 }
 

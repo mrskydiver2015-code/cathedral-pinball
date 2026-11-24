@@ -246,7 +246,25 @@ export class PinballGameController {
 
   rescueStuckBalls(): number {
     if (this.disposed) return 0;
-    return this.physics.rescueStuckBalls();
+    if (
+      (this.phase === 'ready' || this.phase === 'playing' || this.phase === 'multiball') &&
+      this.physics.getActiveBallCount() === 0
+    ) {
+      this.physics.spawnBallInPlungerLane();
+      this.latestFrame = this.physics.getFrameData();
+      this.transitionPhase('ready');
+      return 1;
+    }
+    const rescued = this.physics.rescueStuckBalls();
+    if (rescued > 0 && this.phase === 'ready') {
+      if (!this.ballSaveUsedThisBall) {
+        this.ballSaveRemainingSec = BALL_SAVE_DURATION_SEC;
+      }
+      this.skillShotAvailable = true;
+      this.skillShotWindowSec = SKILL_SHOT_WINDOW_SEC;
+      this.transitionPhase('playing');
+    }
+    return rescued;
   }
 
   setFlipperInput(side: Side, pressed: boolean): void {
