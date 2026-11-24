@@ -5,16 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "typecheck": "tsc --noEmit",
-    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.api.json",
+    "build": "tsc --noEmit && tsc --noEmit -p tsconfig.api.json && vite build",
     "preview": "vite preview",
     "qa:e2e": "node tests/e2e/run-qa.mjs"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.21.0",
+    "@vercel/functions": "^3.11.3",
     "three": "^0.187.0"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
     "@types/three": "^0.187.0",
     "playwright": "^1.65.1",
     "typescript": "^7.0.2",

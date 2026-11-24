@@ -42,6 +42,42 @@ export interface HighScoreEntry {
   readonly maxMultiplier: number;
   readonly dateIso: string;
   readonly isPlayer?: boolean;
+  readonly displayName?: string;
+  readonly avatarColor?: string;
+  readonly friendCode?: string;
+  readonly userId?: string;
+}
+
+export interface PlayerProfile {
+  readonly userId: string;
+  readonly friendCode: string;
+  readonly displayName: string;
+  readonly initials: string;
+  readonly avatarColor: string;
+  readonly role: 'player' | 'vip' | 'admin';
+  readonly banned: boolean;
+  readonly gamesPlayed: number;
+  readonly totalScore: number;
+  readonly bestScore: number;
+  readonly bestMultiplier: number;
+  readonly friendIds: readonly string[];
+}
+
+export interface FriendSummary {
+  readonly userId: string;
+  readonly friendCode: string;
+  readonly displayName: string;
+  readonly initials: string;
+  readonly avatarColor: string;
+  readonly bestScore: number;
+  readonly bestMultiplier?: number;
+  readonly gamesPlayed?: number;
+}
+
+export interface LiveServerConfig {
+  readonly announcement: string;
+  readonly doubleScoreActive: boolean;
+  readonly updatedAt: string;
 }
 
 export type GamePhase =
@@ -64,6 +100,7 @@ export interface BallTelemetry {
 
 export interface GameStateSnapshot {
   readonly phase: GamePhase;
+  readonly paused: boolean;
   readonly score: number;
   readonly highScore: number;
   readonly ballNumber: number;
@@ -124,6 +161,7 @@ export interface PinballDebugHandle {
   getCameraMode(): CameraMode;
   cycleCameraMode(): CameraMode;
   getLeaderboard(): readonly HighScoreEntry[];
+  openAdminPanel(): void;
   setFlipperInput(side: Side, pressed: boolean): void;
   setPlungerCharge(ratio: number): void;
   launchPlunger(chargeRatio: number): void;

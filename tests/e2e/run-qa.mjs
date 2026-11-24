@@ -637,22 +637,90 @@ async function verifyMobileViewport(browser, config) {
       }
       await page.waitForTimeout(350);
 
-      // Verify local High Score Leaderboard modal & persistence
+      // Verify Global / Friends / Profile Social Hub modal, Auto-Pause, & Manual Pause
       const lbEntries = await page.evaluate(() => window.__PINBALL_DEBUG__.getLeaderboard());
       if (!Array.isArray(lbEntries) || lbEntries.length < 5) {
-        throw new Error(`${name}: expected seeded local leaderboard >= 5 entries, got ${JSON.stringify(lbEntries)}`);
+        throw new Error(`${name}: expected seeded leaderboard >= 5 entries, got ${JSON.stringify(lbEntries)}`);
       }
-      await page.locator('.cp-btn-gold').click();
-      await page.waitForTimeout(180);
+
+      // Launch ball so it is actively moving, then open Top modal and verify auto-pause freezes physics!
+      await page.evaluate(() => {
+        window.__PINBALL_DEBUG__.resetGame();
+        window.__PINBALL_DEBUG__.launchPlunger(0.92);
+      });
+      await page.waitForTimeout(220);
+
+      await page.locator('[data-top-btn="true"]').click();
+      await page.waitForTimeout(160);
       const modalOpen = await page.evaluate(() =>
         Boolean(document.querySelector('.cp-modal-backdrop.open')),
       );
       if (!modalOpen) {
         throw new Error(`${name}: clicking Top button did not open leaderboard modal`);
       }
+
+      const frozenBefore = await page.evaluate(() => window.__PINBALL_DEBUG__.getSnapshot());
+      if (!frozenBefore.paused) {
+        throw new Error(`${name}: opening modal did not engage auto-pause`);
+      }
+      await page.waitForTimeout(260);
+      const frozenAfter = await page.evaluate(() => window.__PINBALL_DEBUG__.getSnapshot());
+      const b0 = frozenBefore.balls[0];
+      const b1 = frozenAfter.balls[0];
+      if (
+        !b0 ||
+        !b1 ||
+        Math.abs(b0.position.x - b1.position.x) > 1e-6 ||
+        Math.abs(b0.position.z - b1.position.z) > 1e-6
+      ) {
+        throw new Error(`${name}: ball moved while modal auto-pause was active`);
+      }
+
       await page.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_iphone_leaderboard.png') });
-      await page.locator('.cp-modal-actions .cp-btn:not(.cp-btn-primary)').click();
+
+      // Switch to Friends tab, add rival CAT-8821 (Sister Lyra), and verify Friends High Score List
+      await page.locator('[data-hub-tab="friends"]').click();
+      await page.waitForTimeout(180);
+      await page.locator('[data-friend-input="true"]').fill('CAT-8821');
+      await page.locator('[data-add-friend-btn="true"]').click();
+      await page.waitForFunction(
+        () =>
+          Array.from(document.querySelectorAll('.cp-modal-card .cp-lb-row')).some((el) =>
+            el.textContent?.includes('Sister Lyra'),
+          ),
+        null,
+        { timeout: 6000 },
+      );
+      await page.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_iphone_friends_tab.png') });
+
+      // Switch to Profile tab & capture visual proof
+      await page.locator('[data-hub-tab="profile"]').click();
       await page.waitForTimeout(150);
+      await page.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_iphone_profile_tab.png') });
+
+      // Close modal & verify auto-pause releases cleanly
+      await page.locator('.cp-modal-actions .cp-btn:not(.cp-btn-primary)').click();
+      await page.waitForTimeout(160);
+      const resumedAfterModal = await page.evaluate(() => window.__PINBALL_DEBUG__.getSnapshot().paused);
+      if (resumedAfterModal) {
+        throw new Error(`${name}: closing modal left game paused`);
+      }
+
+      // Verify dedicated Pause button & Center Resume Pill
+      await page.locator('[data-pause-btn="true"]').click();
+      await page.waitForTimeout(120);
+      const manualPauseCheck = await page.evaluate(() => ({
+        paused: window.__PINBALL_DEBUG__.getSnapshot().paused,
+        pillVisible: Boolean(document.querySelector('.cp-pause-pill.visible')),
+      }));
+      if (!manualPauseCheck.paused || !manualPauseCheck.pillVisible) {
+        throw new Error(`${name}: manual Pause button failed (${JSON.stringify(manualPauseCheck)})`);
+      }
+      await page.locator('.cp-pause-pill.visible').click();
+      await page.waitForTimeout(120);
+      if (await page.evaluate(() => window.__PINBALL_DEBUG__.getSnapshot().paused)) {
+        throw new Error(`${name}: clicking center Resume pill did not unpause game`);
+      }
 
       dragPlungerVerified = true;
     }
@@ -735,6 +803,157 @@ async function verifyWebGL2Fallback(browser) {
   }
 }
 
+async function verifySocialInviteAndAdmin(browser) {
+  const name = 'fullstack-social-and-admin';
+  const logs = [];
+  const consoleErrors = [];
+  const pageErrors = [];
+  const failedRequests = [];
+
+  // 1. Desktop Admin & Invite Link Verification
+  const desktopCtx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const page = await desktopCtx.newPage();
+  attachPageMonitors(page, name, logs, consoleErrors, pageErrors, failedRequests);
+
+  try {
+    // Check PWA assets & Cloud API directly
+    const manifestRes = await page.request.get(`${BASE_URL}/manifest.webmanifest`);
+    const iconRes = await page.request.get(`${BASE_URL}/icon.svg`);
+    const lbApiRes = await page.request.get(`${BASE_URL}/api/leaderboard`);
+    if (manifestRes.status() !== 200 || iconRes.status() !== 200 || lbApiRes.status() !== 200) {
+      throw new Error(
+        `${name}: asset/API check failed (manifest=${manifestRes.status()}, icon=${iconRes.status()}, lb=${lbApiRes.status()})`,
+      );
+    }
+    const lbJson = await lbApiRes.json();
+    if (!lbJson.ok || !Array.isArray(lbJson.global) || lbJson.global.length < 5) {
+      throw new Error(`${name}: /api/leaderboard returned unexpected payload`);
+    }
+
+    // Test ?friend=CAT-5510 URL auto-invite mutual friendship (Vespera)
+    await page.goto(`${BASE_URL}/?friend=CAT-5510`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForFunction(() => Boolean(window.__PINBALL_DEBUG__), null, { timeout: 20000 });
+    await page.waitForFunction(() => !window.location.search.includes('friend='), null, {
+      timeout: 8000,
+    });
+    await page.waitForTimeout(350);
+
+    // Open Top -> Friends tab and confirm Vespera (CAT-5510) was auto-added into Friends High Score List
+    await page.locator('[data-top-btn="true"]').click();
+    await page.locator('[data-hub-tab="friends"]').click();
+    await page.waitForFunction(
+      () =>
+        Array.from(document.querySelectorAll('.cp-modal-card .cp-lb-row')).some((el) =>
+          el.textContent?.includes('Vespera'),
+        ),
+      null,
+      { timeout: 6000 },
+    );
+    await page.locator('.cp-modal-actions .cp-btn:not(.cp-btn-primary)').click();
+
+    // Open Administration Portal via URL ?admin=1 and authenticate with CATHEDRAL-2026
+    await page.goto(`${BASE_URL}/?admin=1`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('.cp-admin-overlay.open')),
+      null,
+      { timeout: 15000 },
+    );
+    await page.waitForTimeout(300);
+
+    const hasGate = await page.locator('.cp-admin-gate').isVisible();
+    if (hasGate) {
+      await page.locator('.cp-admin-gate input').fill('CATHEDRAL-2026');
+      await page.locator('.cp-admin-gate button').click();
+    }
+
+    await page.waitForFunction(
+      () => Boolean(document.querySelector('.cp-kpi-grid')),
+      null,
+      { timeout: 8000 },
+    );
+
+    // Toggle 2x Score Event ON then back OFF via Admin LiveOps UI
+    const liveBtns = page.locator('.cp-adm-section button');
+    const toggle2xBtn = liveBtns.filter({ hasText: '2x Score Event' }).first();
+    await toggle2xBtn.click();
+    await page.waitForFunction(
+      () => document.querySelector('.cp-admin-body')?.textContent?.includes('2x Score Event: PÅ'),
+      null,
+      { timeout: 6000 },
+    );
+    await page.locator('.cp-adm-section button').filter({ hasText: '2x Score Event: PÅ' }).click();
+    await page.waitForFunction(
+      () => document.querySelector('.cp-admin-body')?.textContent?.includes('Aktivera 2x Score Event'),
+      null,
+      { timeout: 6000 },
+    );
+
+    const adminDesktopPng = await page.screenshot({
+      path: path.join(DOCS_OUT_DIR, 'qa_admin_dashboard.png'),
+    });
+    if (!inspectPngBuffer(adminDesktopPng).nonBlank) {
+      throw new Error(`${name}: desktop admin screenshot appears blank`);
+    }
+
+    // Switch to Users tab in Admin Dashboard & verify user rows render
+    await page.locator('.cp-admin-tab').filter({ hasText: 'Användare' }).click();
+    await page.waitForFunction(
+      () => document.querySelectorAll('.cp-adm-user-row').length >= 5,
+      null,
+      { timeout: 6000 },
+    );
+    await page.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_admin_users.png') });
+  } finally {
+    await desktopCtx.close();
+  }
+
+  // 2. Mobile iPhone 390x844 Admin Responsive Check
+  const mobileCtx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+    deviceScaleFactor: 2,
+  });
+  const mPage = await mobileCtx.newPage();
+  attachPageMonitors(mPage, `${name}-mobile`, logs, consoleErrors, pageErrors, failedRequests);
+
+  try {
+    await mPage.addInitScript(() => {
+      window.localStorage.setItem('cathedral-pinball-admin-key', 'CATHEDRAL-2026');
+    });
+    await mPage.goto(`${BASE_URL}/?admin=1`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await mPage.waitForFunction(
+      () => Boolean(document.querySelector('.cp-kpi-grid')),
+      null,
+      { timeout: 15000 },
+    );
+    await mPage.waitForTimeout(250);
+
+    const overflow = await mPage.evaluate(
+      () => document.documentElement.scrollWidth > window.innerWidth,
+    );
+    if (overflow) {
+      throw new Error(`${name}: mobile admin dashboard has horizontal overflow`);
+    }
+
+    await mPage.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_iphone_admin.png') });
+  } finally {
+    await mobileCtx.close();
+  }
+
+  if (consoleErrors.length > 0 || pageErrors.length > 0 || failedRequests.length > 0) {
+    throw new Error(
+      `${name}: runtime errors detected:\n${[...consoleErrors, ...pageErrors, ...failedRequests].join('\n')}`,
+    );
+  }
+
+  return {
+    name,
+    passed: true,
+    logs,
+  };
+}
+
 async function main() {
   fs.mkdirSync(DOCS_OUT_DIR, { recursive: true });
 
@@ -802,6 +1021,10 @@ async function main() {
     const webgl2 = await verifyWebGL2Fallback(browser);
     report.runs.push({ ...webgl2, logs: undefined });
     allLogs.push(...webgl2.logs);
+
+    const socialAdmin = await verifySocialInviteAndAdmin(browser);
+    report.runs.push({ ...socialAdmin, logs: undefined });
+    allLogs.push(...socialAdmin.logs);
 
     report.passed = true;
   } catch (err) {

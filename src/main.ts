@@ -5,6 +5,7 @@ import { PinballGameController } from './game/pinballGame.ts';
 import { PinballRenderer } from './render/renderer.ts';
 import { createEventBus } from './shared/events.ts';
 import type { PinballDebugHandle, Side } from './shared/types.ts';
+import { PinballAdminPanel } from './ui/adminPanel.ts';
 import { PinballHud } from './ui/hud.ts';
 
 function getForceWebGLFlag(): boolean {
@@ -12,16 +13,23 @@ function getForceWebGLFlag(): boolean {
   return params.get('forceWebGL') === '1' || params.get('forceWebGL') === 'true';
 }
 
+function shouldAutoOpenAdmin(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  return params.get('admin') === '1' || window.location.hash === '#admin';
+}
+
 function isInteractiveUiTarget(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
   return Boolean(
-    target.closest('[data-ui-control="true"], [data-modal-card="true"], button, input'),
+    target.closest(
+      '[data-ui-control="true"], [data-modal-card="true"], button, input, textarea, select',
+    ),
   );
 }
 
-function isInsideLeaderboardScroll(target: EventTarget | null): boolean {
+function isInsideScrollableOverlay(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false;
-  return Boolean(target.closest('.cp-leaderboard-list'));
+  return Boolean(target.closest('.cp-leaderboard-list, .cp-admin-body'));
 }
 
 function bindControls(params: {
@@ -30,8 +38,9 @@ function bindControls(params: {
   audio: PinballAudioSynth;
   renderer: PinballRenderer;
   hud: PinballHud;
+  admin: PinballAdminPanel;
 }): () => void {
-  const { container, game, audio, renderer, hud } = params;
+  const { container, game, audio, renderer, hud, admin } = params;
 
   const keyLeft = new Set<string>();
   const keyRight = new Set<string>();
@@ -54,9 +63,21 @@ function bindControls(params: {
   const onKeyDown = (event: KeyboardEvent): void => {
     audio.unlock();
 
-    // Route keyboard input to High Score modal / initial entry when open
+    if (admin.isOpen()) {
+      if (event.code === 'Escape') {
+        event.preventDefault();
+        admin.close();
+      }
+      return;
+    }
+
     if (hud.isModalOpen()) {
       hud.handleModalKeyDown(event);
+      return;
+    }
+
+    const activeTag = document.activeElement?.tagName;
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') {
       return;
     }
 
@@ -71,6 +92,15 @@ function bindControls(params: {
     }
 
     if (event.repeat) return;
+
+    if (event.code === 'KeyP' || event.code === 'Escape') {
+      game.togglePaused();
+      return;
+    }
+
+    if (game.isPaused()) {
+      return;
+    }
 
     if (isLeftFlipperKey(event.code)) {
       keyLeft.add(event.code);
@@ -140,10 +170,16 @@ function bindControls(params: {
     }
   };
 
-  // True simultaneous multi-touch: left screen half -> Left Flipper, right half -> Right Flipper
   const onPointerDown = (event: PointerEvent): void => {
     audio.unlock();
-    if (hud.isModalOpen() || isInteractiveUiTarget(event.target)) return;
+    if (
+      hud.isModalOpen() ||
+      admin.isOpen() ||
+      game.isPaused() ||
+      isInteractiveUiTarget(event.target)
+    ) {
+      return;
+    }
     if (event.pointerType === 'mouse' && event.button !== 0) return;
 
     const rect = container.getBoundingClientRect();
@@ -164,7 +200,7 @@ function bindControls(params: {
     }
   };
 
-  // Prevent iOS Safari pinch-to-zoom, double-tap zoom, and page rubber-band pan
+  // Prevent iOS Safari pinch-to-zoom, double-tap zoom, and rubber-band scroll
   let lastTouchEndMs = 0;
   const preventGestureZoom = (event: Event): void => {
     event.preventDefault();
@@ -176,7 +212,11 @@ function bindControls(params: {
     }
   };
   const onDocumentTouchMove = (event: TouchEvent): void => {
-    if (hud.isModalOpen() && event.touches.length === 1 && isInsideLeaderboardScroll(event.target)) {
+    if (
+      (hud.isModalOpen() || admin.isOpen()) &&
+      event.touches.length === 1 &&
+      isInsideScrollableOverlay(event.target)
+    ) {
       return;
     }
     event.preventDefault();
@@ -259,6 +299,20 @@ async function bootstrap(): Promise<void> {
   ]);
 
   const audio = new PinballAudioSynth(bus);
+  let modalOpenState = false;
+  let adminOpenState = false;
+  const syncOverlayPause = (): void => {
+    game.setOverlayPaused(modalOpenState || adminOpenState);
+  };
+
+  const adminPanel = new PinballAdminPanel(container, {
+    social: game.getSocialClient(),
+    onOpenChange: (open) => {
+      adminOpenState = open;
+      syncOverlayPause();
+    },
+  });
+
   const hud = new PinballHud(container, bus, {
     onStartOrRestart: () => {
       audio.unlock();
@@ -267,6 +321,14 @@ async function bootstrap(): Promise<void> {
     onToggleMute: () => {
       audio.unlock();
       return audio.toggleMute();
+    },
+    onTogglePause: () => {
+      audio.unlock();
+      return game.togglePaused();
+    },
+    onModalPauseChange: (open: boolean) => {
+      modalOpenState = open;
+      syncOverlayPause();
     },
     onCycleCamera: () => {
       audio.unlock();
@@ -289,12 +351,26 @@ async function bootstrap(): Promise<void> {
       audio.unlock();
       game.launchPlunger(ratio);
     },
+    onOpenAdmin: () => {
+      audio.unlock();
+      adminPanel.open();
+    },
     getHighScoreStore: () => game.getHighScoreStore(),
+    getSocialClient: () => game.getSocialClient(),
     getLastGameOverRecord: () => game.getLastGameOverRecord(),
   });
 
   // Ready the first ball in the plunger lane immediately for instant play
   game.startNewGame();
+
+  // Sync player profile & auto-process any ?friend=CAT-XXXX invite URL
+  void game.getSocialClient().bootstrapAndCheckInviteLink((addedFriendName) => {
+    hud.showNotification(`✓ Friend Added: ${addedFriendName}!`, 2800);
+  });
+
+  if (shouldAutoOpenAdmin()) {
+    adminPanel.open();
+  }
 
   const debugHandle: PinballDebugHandle = {
     getSnapshot: () => game.getSnapshot(),
@@ -302,7 +378,8 @@ async function bootstrap(): Promise<void> {
     getEventCounts: () => bus.getEventCounts(),
     getCameraMode: () => renderer.getCameraMode(),
     cycleCameraMode: () => renderer.cycleCameraMode(),
-    getLeaderboard: () => game.getHighScoreStore().getEntries(),
+    getLeaderboard: () => game.getSocialClient().getGlobalLeaderboard(),
+    openAdminPanel: () => adminPanel.open(),
     setFlipperInput: (side: Side, pressed: boolean) => game.setFlipperInput(side, pressed),
     setPlungerCharge: (ratio: number) => game.setManualPlungerCharge(ratio),
     launchPlunger: (chargeRatio: number) => game.launchPlunger(chargeRatio),
@@ -312,7 +389,14 @@ async function bootstrap(): Promise<void> {
   };
   window.__PINBALL_DEBUG__ = debugHandle;
 
-  const unbindControls = bindControls({ container, game, audio, renderer, hud });
+  const unbindControls = bindControls({
+    container,
+    game,
+    audio,
+    renderer,
+    hud,
+    admin: adminPanel,
+  });
 
   const timer = new THREE.Timer();
   timer.connect(document);
@@ -351,6 +435,7 @@ async function bootstrap(): Promise<void> {
       unbindControls();
       timer.disconnect();
       timer.dispose();
+      adminPanel.dispose();
       hud.dispose();
       audio.dispose();
       renderer.dispose();

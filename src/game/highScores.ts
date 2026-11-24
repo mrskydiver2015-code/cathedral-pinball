@@ -131,9 +131,9 @@ export class HighScoreStore {
 
   private persist(entries: readonly HighScoreEntry[]): void {
     writeLocalStorage(LEADERBOARD_STORAGE_KEY, JSON.stringify(entries));
-    const top = entries[0]?.score ?? 0;
-    if (top > 0) {
-      writeLocalStorage(LEGACY_HIGH_SCORE_KEY, String(top));
+    const playerTop = entries.reduce((max, e) => (e.isPlayer && e.score > max ? e.score : max), 0);
+    if (playerTop > 0) {
+      writeLocalStorage(LEGACY_HIGH_SCORE_KEY, String(playerTop));
     }
   }
 
@@ -143,6 +143,10 @@ export class HighScoreStore {
 
   getTopScore(): number {
     return this.entries[0]?.score ?? 0;
+  }
+
+  getPlayerBestScore(): number {
+    return this.entries.reduce((max, e) => (e.isPlayer && e.score > max ? e.score : max), 0);
   }
 
   getPreferredInitials(): string {

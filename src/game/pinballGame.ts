@@ -2,6 +2,7 @@ import {
   HighScoreStore,
   type RecordedHighScoreResult,
 } from './highScores.ts';
+import { SocialClient } from './socialClient.ts';
 import { PinballPhysicsWorld, type PhysicsFrameData } from '../physics/pinballPhysics.ts';
 import type { PinballEventBus } from '../shared/events.ts';
 import { TABLE_SPEC } from '../shared/tableSpec.ts';
@@ -31,9 +32,12 @@ export class PinballGameController {
   private readonly bus: PinballEventBus;
   private readonly physics: PinballPhysicsWorld;
   private readonly highScores = new HighScoreStore();
+  private readonly social = new SocialClient(this.highScores);
   private readonly unsubscribers: (() => void)[] = [];
 
   private phase: GamePhase = 'attract';
+  private userPaused = false;
+  private overlayPaused = false;
   private score = 0;
   private highScore: number;
   private ballNumber = 1;
@@ -69,7 +73,7 @@ export class PinballGameController {
     }) => PinballPhysicsWorld,
   ) {
     this.bus = bus;
-    this.highScore = this.highScores.getTopScore();
+    this.highScore = this.highScores.getPlayerBestScore();
     this.physics = physicsFactory({
       onBallDrain: (ballId, activeRemaining) => this.handleBallDrain(ballId, activeRemaining),
       onMultiballLockHit: (ballId) => this.handleMultiballLockHit(ballId),
@@ -165,7 +169,8 @@ export class PinballGameController {
   }
 
   private addScore(basePoints: number, reason: string): void {
-    const delta = Math.round(basePoints * this.multiplier);
+    const liveBoost = this.social.getLiveConfig().doubleScoreActive ? 2 : 1;
+    const delta = Math.round(basePoints * this.multiplier * liveBoost);
     if (delta <= 0) return;
     this.score += delta;
     if (this.score > this.highScore) {
@@ -174,7 +179,7 @@ export class PinballGameController {
     this.bus.emit('scoreDelta', {
       delta,
       totalScore: this.score,
-      multiplier: this.multiplier,
+      multiplier: this.multiplier * liveBoost,
       reason,
     });
   }
@@ -197,7 +202,11 @@ export class PinballGameController {
     this.physics.resetWorld();
 
     this.score = 0;
-    this.highScore = this.highScores.getTopScore();
+    this.userPaused = false;
+    this.highScore = Math.max(
+      this.highScores.getPlayerBestScore(),
+      this.social.getProfile().bestScore,
+    );
     this.ballNumber = 1;
     this.lockedBalls = 0;
     this.multiplier = 1;
@@ -575,6 +584,7 @@ export class PinballGameController {
       this.maxMultiplierReached,
     );
     this.highScore = Math.max(this.highScore, this.highScores.getTopScore());
+    void this.social.submitCompletedGameScore(this.score, this.maxMultiplierReached);
     this.transitionPhase('gameOver');
   }
 
@@ -582,12 +592,43 @@ export class PinballGameController {
     return this.highScores;
   }
 
+  getSocialClient(): SocialClient {
+    return this.social;
+  }
+
   getLastGameOverRecord(): RecordedHighScoreResult | null {
     return this.lastGameOverRecord;
   }
 
+  isPaused(): boolean {
+    return this.userPaused || this.overlayPaused;
+  }
+
+  setPaused(paused: boolean): boolean {
+    this.userPaused = paused;
+    if (this.isPaused()) {
+      this.physics.setFlipperInput('left', false);
+      this.physics.setFlipperInput('right', false);
+    }
+    return this.userPaused;
+  }
+
+  togglePaused(): boolean {
+    return this.setPaused(!this.userPaused);
+  }
+
+  setOverlayPaused(open: boolean): void {
+    this.overlayPaused = open;
+    if (open) {
+      this.leftFlipperActive = false;
+      this.rightFlipperActive = false;
+      this.physics.setFlipperInput('left', false);
+      this.physics.setFlipperInput('right', false);
+    }
+  }
+
   update(dtSeconds: number): { snapshot: GameStateSnapshot; physics: PhysicsFrameData } {
-    if (this.disposed) {
+    if (this.disposed || this.isPaused()) {
       return {
         snapshot: this.getSnapshot(),
         physics: this.latestFrame,
@@ -656,6 +697,7 @@ export class PinballGameController {
 
     return {
       phase: this.phase,
+      paused: this.isPaused(),
       score: this.score,
       highScore: this.highScore,
       ballNumber: this.ballNumber,

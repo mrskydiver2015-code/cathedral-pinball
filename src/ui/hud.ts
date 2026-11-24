@@ -1,27 +1,36 @@
 import type { HighScoreStore, RecordedHighScoreResult } from '../game/highScores.ts';
+import type { SocialClient } from '../game/socialClient.ts';
 import type { PinballEventBus } from '../shared/events.ts';
 import { TABLE_SPEC } from '../shared/tableSpec.ts';
 import type {
   CameraMode,
   GamePhase,
   GameStateSnapshot,
+  HighScoreEntry,
   RendererCapabilities,
 } from '../shared/types.ts';
 
 export interface HudCallbacks {
   onStartOrRestart(): void;
   onToggleMute(): boolean;
+  onTogglePause(): boolean;
+  onModalPauseChange(open: boolean): void;
   onCycleCamera(): CameraMode;
   getCameraMode(): CameraMode;
   onRescueBall(): void;
   onNudge(): void;
   onPlungerDrag(ratio: number): void;
   onPlungerRelease(ratio: number): void;
+  onOpenAdmin(): void;
   getHighScoreStore(): HighScoreStore;
+  getSocialClient(): SocialClient;
   getLastGameOverRecord(): RecordedHighScoreResult | null;
 }
 
+type HubTab = 'global' | 'friends' | 'profile';
+
 const INITIAL_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+const AVATAR_SWATCHES = ['#38bdf8', '#f59e0b', '#e879f9', '#34d399', '#fb7185', '#a78bfa'] as const;
 
 const CAMERA_LABELS: Readonly<Record<CameraMode, string>> = {
   classic: 'Classic',
@@ -34,6 +43,16 @@ const CAMERA_DESCRIPTIONS: Readonly<Record<CameraMode, string>> = {
   action: 'Camera: Action Zoom (Follow)',
   top: 'Camera: Overhead Table',
 };
+
+function pulseHaptic(ms: number): void {
+  try {
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(ms);
+    }
+  } catch {
+    // Ignore unsupported vibration APIs (e.g. iOS Safari)
+  }
+}
 
 const HUD_STYLES = `
 .cp-hud {
@@ -57,7 +76,7 @@ const HUD_STYLES = `
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.56), inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
-/* Top-Left Scoreboard — compact 3-row layout that never obscures upper playfield */
+/* Top-Left Scoreboard */
 .cp-top-left {
   position: absolute;
   top: calc(12px + env(safe-area-inset-top));
@@ -146,10 +165,6 @@ const HUD_STYLES = `
 .cp-best-btn:hover {
   background: rgba(146, 64, 14, 0.52);
   border-color: rgba(251, 191, 36, 0.68);
-}
-
-.cp-best-btn:active {
-  transform: translateY(1px);
 }
 
 .cp-metrics-row {
@@ -241,7 +256,28 @@ const HUD_STYLES = `
   border-color: rgba(251, 113, 133, 0.6);
 }
 
-/* Unified Top-Right Control Grid */
+/* LiveOps Announcement Pill */
+.cp-liveops-pill {
+  display: none;
+  margin-top: 6px;
+  padding: 3px 8px;
+  border-radius: 7px;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  color: #fef08a;
+  background: linear-gradient(90deg, rgba(146, 64, 14, 0.52), rgba(88, 28, 135, 0.48));
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-liveops-pill.visible {
+  display: block;
+}
+
+/* Symmetrical 2x3 Top-Right Control Grid */
 .cp-top-right {
   position: absolute;
   top: calc(12px + env(safe-area-inset-top));
@@ -304,17 +340,49 @@ const HUD_STYLES = `
   background: rgba(12, 46, 78, 0.84);
 }
 
-.cp-btn-unstick {
-  grid-column: 2;
-  justify-self: end;
+.cp-btn-sub {
   font-size: 10px;
   padding: 5px 9px;
-  color: #a5b4fc;
-  border-color: rgba(129, 140, 248, 0.25);
-  background: rgba(10, 14, 30, 0.7);
+  color: #cbd5f5;
+  border-color: rgba(129, 140, 248, 0.24);
+  background: rgba(10, 14, 30, 0.72);
 }
 
-/* Transient Callout & Floating Combo Popups */
+.cp-btn-sub.paused {
+  border-color: rgba(251, 191, 36, 0.68);
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.58);
+}
+
+/* Center Pause Banner */
+.cp-pause-pill {
+  position: absolute;
+  top: 46%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 22px;
+  border-radius: 999px;
+  background: rgba(8, 12, 28, 0.92);
+  border: 1.5px solid rgba(251, 191, 36, 0.65);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.72), 0 0 24px rgba(251, 191, 36, 0.28);
+  color: #fef3c7;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  pointer-events: auto;
+  cursor: pointer;
+  z-index: 35;
+}
+
+.cp-pause-pill.visible {
+  display: inline-flex;
+}
+
+/* Transient Callout & Floating Popups */
 .cp-callout {
   position: absolute;
   top: calc(16px + env(safe-area-inset-top));
@@ -387,7 +455,7 @@ const HUD_STYLES = `
   animation: cpFloatPop 1.15s cubic-bezier(0.18, 0.85, 0.3, 1) forwards;
 }
 
-/* Sculpted Right-Side Plunger Slider with Brass Knob */
+/* Plunger Slider */
 .cp-plunger-wrap {
   position: absolute;
   right: calc(14px + env(safe-area-inset-right));
@@ -454,7 +522,7 @@ const HUD_STYLES = `
   color: #fde68a;
 }
 
-/* Large Sculpted AAA Arcade NUDGE Button at 40% Left Edge */
+/* Large Sculpted NUDGE Button */
 .cp-nudge-btn {
   appearance: none;
   position: absolute;
@@ -488,9 +556,7 @@ const HUD_STYLES = `
 
 .cp-nudge-btn:hover {
   border-color: rgba(253, 224, 71, 0.82);
-  box-shadow:
-    0 10px 26px rgba(0, 0, 0, 0.62),
-    0 0 22px rgba(245, 158, 11, 0.34);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.62), 0 0 22px rgba(245, 158, 11, 0.34);
 }
 
 .cp-nudge-btn:active,
@@ -561,7 +627,7 @@ const HUD_STYLES = `
   box-shadow: 0 0 8px #f43f5e;
 }
 
-/* Clean Bottom Corner Touch Glows (no text clutter over lockdown bar!) */
+/* Bottom Edge Flipper Glows */
 .cp-flipper-glow {
   position: absolute;
   bottom: 0;
@@ -575,17 +641,9 @@ const HUD_STYLES = `
   transition: opacity 0.08s ease;
 }
 
-.cp-flipper-glow.left {
-  left: 4vw;
-}
-
-.cp-flipper-glow.right {
-  right: 4vw;
-}
-
-.cp-flipper-glow.active {
-  opacity: 0.95;
-}
+.cp-flipper-glow.left { left: 4vw; }
+.cp-flipper-glow.right { right: 4vw; }
+.cp-flipper-glow.active { opacity: 0.95; }
 
 .cp-hints {
   position: absolute;
@@ -603,18 +661,18 @@ const HUD_STYLES = `
   text-overflow: ellipsis;
 }
 
-/* High Score Leaderboard & Game Over Modal */
+/* Social Hub Modal (Global / Friends / Profile) */
 .cp-modal-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(3, 5, 14, 0.72);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(3, 5, 14, 0.76);
+  backdrop-filter: blur(9px);
+  -webkit-backdrop-filter: blur(9px);
   display: none;
   align-items: center;
   justify-content: center;
-  padding: calc(16px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right))
-    calc(16px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left));
+  padding: calc(14px + env(safe-area-inset-top)) calc(12px + env(safe-area-inset-right))
+    calc(14px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left));
   pointer-events: auto;
   z-index: 60;
 }
@@ -625,25 +683,28 @@ const HUD_STYLES = `
 
 .cp-modal-card {
   width: 100%;
-  max-width: 400px;
-  max-height: 86dvh;
+  max-width: 430px;
+  max-height: 88dvh;
   display: flex;
   flex-direction: column;
-  padding: 18px 18px 16px;
+  padding: 16px 16px 14px;
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(13, 19, 40, 0.96) 0%, rgba(7, 10, 24, 0.98) 100%);
-  border: 1px solid rgba(251, 191, 36, 0.42);
-  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.78), 0 0 36px rgba(56, 189, 248, 0.14);
+  background: linear-gradient(180deg, rgba(13, 19, 40, 0.97) 0%, rgba(7, 10, 24, 0.99) 100%);
+  border: 1px solid rgba(251, 191, 36, 0.44);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.8), 0 0 38px rgba(56, 189, 248, 0.14);
   overflow: hidden;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .cp-modal-header {
   text-align: center;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
 }
 
 .cp-modal-kicker {
-  font-size: 10px;
+  font-size: 9.5px;
   font-weight: 800;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -651,33 +712,68 @@ const HUD_STYLES = `
 }
 
 .cp-modal-title {
-  margin-top: 3px;
-  font-size: 20px;
+  margin-top: 2px;
+  font-size: 19px;
   font-weight: 800;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
   color: #ffffff;
 }
 
 .cp-modal-run-score {
-  margin-top: 4px;
-  font-size: 28px;
+  margin-top: 3px;
+  font-size: 26px;
   font-weight: 900;
   font-variant-numeric: tabular-nums;
   color: #7dd3fc;
   text-shadow: 0 0 18px rgba(56, 189, 248, 0.4);
 }
 
-/* Tactile 3-Letter Initials Stepper (mobile + desktop keyboard friendly) */
+/* Hub Navigation Tabs */
+.cp-hub-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  padding: 4px;
+  border-radius: 11px;
+  background: rgba(6, 9, 22, 0.85);
+  border: 1px solid rgba(148, 179, 255, 0.16);
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.cp-hub-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 800;
+  padding: 7px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.cp-hub-tab.active {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.42), rgba(168, 85, 247, 0.42));
+  color: #ffffff;
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.45);
+}
+
+/* Tactile 3-Letter Initials Stepper */
 .cp-initials-box {
   display: none;
   flex-direction: column;
   align-items: center;
-  gap: 7px;
-  padding: 10px 12px;
-  margin-bottom: 10px;
+  gap: 6px;
+  padding: 9px 11px;
+  margin-bottom: 9px;
   border-radius: 12px;
   background: rgba(30, 41, 78, 0.5);
   border: 1px solid rgba(251, 191, 36, 0.42);
+  flex-shrink: 0;
 }
 
 .cp-initials-box.visible {
@@ -685,7 +781,7 @@ const HUD_STYLES = `
 }
 
 .cp-initials-label {
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -706,32 +802,27 @@ const HUD_STYLES = `
 
 .cp-step-btn {
   appearance: none;
-  width: 40px;
-  height: 24px;
+  width: 38px;
+  height: 22px;
   border-radius: 7px;
   border: 1px solid rgba(148, 179, 255, 0.28);
   background: rgba(15, 23, 48, 0.9);
   color: #cbd5f5;
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 800;
   cursor: pointer;
   touch-action: manipulation;
 }
 
-.cp-step-btn:active {
-  background: rgba(56, 189, 248, 0.35);
-}
-
 .cp-initial-char {
-  width: 40px;
-  height: 40px;
-  border-radius: 9px;
+  width: 38px;
+  height: 36px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 21px;
+  font-size: 19px;
   font-weight: 900;
-  letter-spacing: 0.04em;
   color: #fef3c7;
   background: rgba(8, 12, 28, 0.92);
   border: 1.5px solid rgba(251, 191, 36, 0.55);
@@ -744,27 +835,28 @@ const HUD_STYLES = `
   color: #ffffff;
 }
 
+/* Scrollable Tab Content Area */
 .cp-leaderboard-list {
   flex: 1 1 auto;
   overflow-y: auto;
   touch-action: pan-y;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
   padding-right: 2px;
-  margin-bottom: 12px;
+  margin-bottom: 11px;
 }
 
 .cp-lb-row {
   display: grid;
-  grid-template-columns: 34px 54px 1fr auto;
+  grid-template-columns: 36px 28px 1fr auto auto;
   align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
+  gap: 7px;
+  padding: 7px 9px;
   border-radius: 9px;
-  background: rgba(16, 24, 50, 0.62);
+  background: rgba(16, 24, 50, 0.66);
   border: 1px solid rgba(148, 179, 255, 0.12);
-  font-size: 13px;
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -781,43 +873,198 @@ const HUD_STYLES = `
 .cp-lb-rank {
   font-weight: 800;
   color: #94a3b8;
-  font-size: 12px;
+  font-size: 11.5px;
 }
 
-.cp-lb-row.rank-1 .cp-lb-rank {
-  color: #fbbf24;
-}
-.cp-lb-row.rank-2 .cp-lb-rank {
-  color: #e2e8f0;
-}
-.cp-lb-row.rank-3 .cp-lb-rank {
-  color: #fdba74;
-}
+.cp-lb-row.rank-1 .cp-lb-rank { color: #fbbf24; }
+.cp-lb-row.rank-2 .cp-lb-rank { color: #e2e8f0; }
+.cp-lb-row.rank-3 .cp-lb-rank { color: #fdba74; }
 
-.cp-lb-initials {
+.cp-lb-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9.5px;
   font-weight: 900;
-  letter-spacing: 0.12em;
+  color: #04050b;
+}
+
+.cp-lb-player {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.cp-lb-name {
+  font-weight: 800;
   color: #f8fafc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cp-lb-code {
+  font-size: 9.5px;
+  color: #94a3b8;
 }
 
 .cp-lb-mult {
   font-size: 10.5px;
   font-weight: 700;
   color: #f472b6;
-  justify-self: end;
 }
 
 .cp-lb-score {
   font-weight: 800;
   color: #ffffff;
   text-align: right;
-  min-width: 72px;
+  min-width: 64px;
+}
+
+/* Friends & Profile Controls inside Modal */
+.cp-friend-card {
+  padding: 10px 11px;
+  border-radius: 11px;
+  background: rgba(18, 28, 60, 0.65);
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cp-friend-code-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cp-my-code-badge {
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  color: #fde68a;
+  padding: 4px 9px;
+  border-radius: 7px;
+  background: rgba(120, 53, 15, 0.45);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+}
+
+.cp-input-row {
+  display: flex;
+  gap: 6px;
+}
+
+.cp-text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 179, 255, 0.3);
+  background: rgba(6, 10, 24, 0.92);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.cp-text-input:focus {
+  border-color: #38bdf8;
+}
+
+.cp-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.cp-rival-chip {
+  appearance: none;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 179, 255, 0.25);
+  background: rgba(15, 23, 48, 0.85);
+  color: #bae6fd;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.cp-rival-chip:hover {
+  border-color: #38bdf8;
+  background: rgba(14, 116, 144, 0.35);
+}
+
+.cp-feedback-msg {
+  font-size: 11px;
+  font-weight: 700;
+  color: #6ee7b7;
+  min-height: 15px;
+}
+
+.cp-feedback-msg.err {
+  color: #fda4af;
+}
+
+.cp-swatch-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.cp-swatch {
+  appearance: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+}
+
+.cp-swatch.active {
+  border-color: #ffffff;
+  transform: scale(1.12);
+  box-shadow: 0 0 10px currentColor;
+}
+
+.cp-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 7px;
+}
+
+.cp-stat-box {
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(12, 18, 38, 0.78);
+  border: 1px solid rgba(148, 179, 255, 0.14);
+}
+
+.cp-stat-lbl {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.cp-stat-val {
+  margin-top: 2px;
+  font-size: 16px;
+  font-weight: 800;
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
 }
 
 .cp-modal-actions {
   display: flex;
   gap: 8px;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .cp-modal-actions .cp-btn {
@@ -882,12 +1129,12 @@ const HUD_STYLES = `
     border-radius: 8px;
     gap: 3px;
   }
-  .cp-btn-unstick {
+  .cp-btn-sub {
     font-size: 9px;
     padding: 4px 7px;
   }
   .cp-callout {
-    top: calc(92px + env(safe-area-inset-top));
+    top: calc(96px + env(safe-area-inset-top));
     font-size: 10.5px;
     padding: 5px 12px;
   }
@@ -947,10 +1194,7 @@ const HUD_STYLES = `
   }
   .cp-modal-card {
     padding: 12px 14px;
-    max-width: 440px;
-  }
-  .cp-modal-run-score {
-    font-size: 22px;
+    max-width: 450px;
   }
 }
 `;
@@ -974,12 +1218,15 @@ export class PinballHud {
   private readonly multiplierPill: HTMLSpanElement;
   private readonly lockPips: readonly HTMLSpanElement[];
   private readonly statusBadge: HTMLSpanElement;
+  private readonly liveopsPill: HTMLDivElement;
 
   private readonly startBtn: HTMLButtonElement;
   private readonly scoresBtn: HTMLButtonElement;
   private readonly cameraBtn: HTMLButtonElement;
   private readonly muteBtn: HTMLButtonElement;
+  private readonly pauseBtn: HTMLButtonElement;
   private readonly rescueBtn: HTMLButtonElement;
+  private readonly pauseCenterPill: HTMLButtonElement;
   private readonly nudgeBtn: HTMLButtonElement;
   private readonly nudgeLeds: readonly [HTMLSpanElement, HTMLSpanElement];
 
@@ -991,21 +1238,26 @@ export class PinballHud {
   private readonly leftGlow: HTMLDivElement;
   private readonly rightGlow: HTMLDivElement;
 
-  // High Score Leaderboard Modal
+  // Social & Leaderboard Hub Modal
   private readonly modalBackdrop: HTMLDivElement;
   private readonly modalKicker: HTMLDivElement;
   private readonly modalTitle: HTMLDivElement;
   private readonly modalRunScore: HTMLDivElement;
+  private readonly hubTabBtns = new Map<HubTab, HTMLButtonElement>();
   private readonly initialsBox: HTMLDivElement;
   private readonly initialsLabel: HTMLDivElement;
   private readonly initialCharEls: readonly [HTMLDivElement, HTMLDivElement, HTMLDivElement];
-  private readonly leaderboardList: HTMLDivElement;
+  private readonly hubContentList: HTMLDivElement;
   private readonly modalPlayBtn: HTMLButtonElement;
 
   private modalOpen = false;
+  private activeHubTab: HubTab = 'global';
   private activeRecordEntryId: string | null = null;
   private currentInitials: [string, string, string] = ['Y', 'O', 'U'];
   private selectedInitialSlot: 0 | 1 | 2 = 0;
+  private draftFriendQuery = '';
+  private friendFeedbackMsg = '';
+  private friendFeedbackErr = false;
   private gameOverModalTimer: number | null = null;
   private nudgePulseTimer: number | null = null;
 
@@ -1016,7 +1268,7 @@ export class PinballHud {
   private plungerDidDrag = false;
   private disposed = false;
 
-  // Cached values to avoid redundant 60fps DOM churn
+  // Cached values
   private lastScore = -1;
   private lastHighScore = -1;
   private lastBallNum = -1;
@@ -1024,7 +1276,9 @@ export class PinballHud {
   private lastMultiplier = -1;
   private lastLocked = -1;
   private lastStatusKey = '';
+  private lastLiveOpsKey = '';
   private lastPhase: GamePhase | null = null;
+  private lastPaused: boolean | null = null;
   private lastBackendKey = '';
   private lastPlungerPct = -1;
   private lastLeftActive: boolean | null = null;
@@ -1076,14 +1330,14 @@ export class PinballHud {
     bestBtn.type = 'button';
     bestBtn.className = 'cp-best-btn';
     bestBtn.dataset.uiControl = 'true';
-    bestBtn.title = 'Open High Score Leaderboard';
+    bestBtn.title = 'Open Global & Friends Leaderboards';
     const trophySpan = document.createElement('span');
     trophySpan.textContent = '🏆';
     this.bestBtnText = document.createElement('span');
     this.bestBtnText.textContent = '0';
     bestBtn.append(trophySpan, this.bestBtnText);
     bestBtn.addEventListener('click', () => {
-      this.openLeaderboardModal(false);
+      this.openLeaderboardModal(false, undefined, 'friends');
     });
     scoreRow.append(this.scoreValue, bestBtn);
 
@@ -1120,9 +1374,13 @@ export class PinballHud {
     this.statusBadge.textContent = 'Ready';
 
     metricsRow.append(this.ballPill, this.multiplierPill, lockPill, this.statusBadge);
-    topLeft.append(headerRow, scoreRow, metricsRow);
 
-    // 2. Top-Right Harmonious 2-Column Action Grid
+    this.liveopsPill = document.createElement('div');
+    this.liveopsPill.className = 'cp-liveops-pill';
+
+    topLeft.append(headerRow, scoreRow, metricsRow, this.liveopsPill);
+
+    // 2. Symmetrical 2x3 Top-Right Control Grid
     const topRight = document.createElement('div');
     topRight.className = 'cp-top-right';
     topRight.dataset.uiControl = 'true';
@@ -1141,6 +1399,7 @@ export class PinballHud {
     this.scoresBtn.type = 'button';
     this.scoresBtn.className = 'cp-btn cp-btn-gold';
     this.scoresBtn.dataset.uiControl = 'true';
+    this.scoresBtn.dataset.topBtn = 'true';
     this.scoresBtn.textContent = '🏆 Top';
     this.scoresBtn.addEventListener('click', () => {
       if (this.modalOpen) {
@@ -1171,9 +1430,19 @@ export class PinballHud {
       this.muteBtn.textContent = isMuted ? '✕ Muted' : '♪ Sound';
     });
 
+    this.pauseBtn = document.createElement('button');
+    this.pauseBtn.type = 'button';
+    this.pauseBtn.className = 'cp-btn cp-btn-sub';
+    this.pauseBtn.dataset.uiControl = 'true';
+    this.pauseBtn.dataset.pauseBtn = 'true';
+    this.pauseBtn.textContent = '⏸ Pause';
+    this.pauseBtn.addEventListener('click', () => {
+      this.callbacks.onTogglePause();
+    });
+
     this.rescueBtn = document.createElement('button');
     this.rescueBtn.type = 'button';
-    this.rescueBtn.className = 'cp-btn cp-btn-unstick';
+    this.rescueBtn.className = 'cp-btn cp-btn-sub';
     this.rescueBtn.dataset.uiControl = 'true';
     this.rescueBtn.title = 'Unstick / Rescue active ball';
     this.rescueBtn.textContent = '⚡ Unstick';
@@ -1181,16 +1450,33 @@ export class PinballHud {
       this.callbacks.onRescueBall();
     });
 
-    topRight.append(this.startBtn, this.scoresBtn, this.cameraBtn, this.muteBtn, this.rescueBtn);
+    topRight.append(
+      this.startBtn,
+      this.scoresBtn,
+      this.cameraBtn,
+      this.muteBtn,
+      this.pauseBtn,
+      this.rescueBtn,
+    );
 
-    // 3. Callout Banner & Floating Combo Layer
+    // Center Pause Resume Pill
+    this.pauseCenterPill = document.createElement('button');
+    this.pauseCenterPill.type = 'button';
+    this.pauseCenterPill.className = 'cp-pause-pill';
+    this.pauseCenterPill.dataset.uiControl = 'true';
+    this.pauseCenterPill.textContent = '▶ Paused — Tap to Resume';
+    this.pauseCenterPill.addEventListener('click', () => {
+      this.callbacks.onTogglePause();
+    });
+
+    // 3. Callout Banner & Floating Popups
     this.calloutBanner = document.createElement('div');
     this.calloutBanner.className = 'cp-callout';
 
     this.floatLayer = document.createElement('div');
     this.floatLayer.className = 'cp-float-layer';
 
-    // 4. Right-Side Plunger Slider with Physical Brass Knob
+    // 4. Right-Side Plunger Slider
     const plungerWrap = document.createElement('div');
     plungerWrap.className = 'cp-panel cp-plunger-wrap';
     plungerWrap.dataset.uiControl = 'true';
@@ -1210,7 +1496,7 @@ export class PinballHud {
 
     this.bindTouchPlunger(plungerWrap);
 
-    // 5. Large Sculpted Arcade NUDGE Button at 40% Left Edge
+    // 5. Large Sculpted NUDGE Button
     this.nudgeBtn = document.createElement('button');
     this.nudgeBtn.type = 'button';
     this.nudgeBtn.className = 'cp-nudge-btn';
@@ -1243,6 +1529,7 @@ export class PinballHud {
     const onNudgePointerDown = (e: PointerEvent): void => {
       e.stopPropagation();
       e.preventDefault();
+      pulseHaptic(18);
       this.nudgeBtn.classList.add('pulsing');
       if (this.nudgePulseTimer !== null) window.clearTimeout(this.nudgePulseTimer);
       this.nudgePulseTimer = window.setTimeout(() => {
@@ -1258,19 +1545,18 @@ export class PinballHud {
       this.nudgeBtn.removeEventListener('pointerdown', onNudgePointerDown);
     });
 
-    // 6. Subtle Bottom Edge Flipper Glows
+    // 6. Flipper Glows & Desktop Hints
     this.leftGlow = document.createElement('div');
     this.leftGlow.className = 'cp-flipper-glow left';
     this.rightGlow = document.createElement('div');
     this.rightGlow.className = 'cp-flipper-glow right';
 
-    // 7. Desktop Keyboard Hint Strip
     const hints = document.createElement('div');
     hints.className = 'cp-panel cp-hints';
     hints.textContent =
-      'A / ← Left  •  D / → Right  •  Space / ↓ Plunger  •  Z / X / ↑ Nudge  •  C Camera  •  M Mute';
+      'A / ← Left  •  D / → Right  •  Space / ↓ Plunger  •  Z / X / ↑ Nudge  •  C Camera  •  P Pause  •  H Top';
 
-    // 8. High Score Leaderboard & Game Over Modal
+    // 7. Social & Leaderboard Hub Modal (Global / Friends / Profile)
     this.modalBackdrop = document.createElement('div');
     this.modalBackdrop.className = 'cp-modal-backdrop';
     this.modalBackdrop.dataset.uiControl = 'true';
@@ -1293,7 +1579,29 @@ export class PinballHud {
     this.modalRunScore.style.display = 'none';
     modalHeader.append(this.modalKicker, this.modalTitle, this.modalRunScore);
 
-    // 3-Letter Arcade Initials Stepper
+    // 3 Hub Tabs
+    const hubTabs = document.createElement('div');
+    hubTabs.className = 'cp-hub-tabs';
+    const tabDefs: Array<[HubTab, string]> = [
+      ['global', '🌍 Global'],
+      ['friends', '👥 Friends'],
+      ['profile', '👤 Profile'],
+    ];
+    for (const [id, label] of tabDefs) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = id === this.activeHubTab ? 'cp-hub-tab active' : 'cp-hub-tab';
+      btn.dataset.uiControl = 'true';
+      btn.dataset.hubTab = id;
+      btn.textContent = label;
+      btn.addEventListener('click', () => {
+        this.switchHubTab(id);
+      });
+      this.hubTabBtns.set(id, btn);
+      hubTabs.appendChild(btn);
+    }
+
+    // 3-Letter Arcade Initials Stepper (shown on Top-10 Game Over)
     this.initialsBox = document.createElement('div');
     this.initialsBox.className = 'cp-initials-box';
     this.initialsLabel = document.createElement('div');
@@ -1344,9 +1652,9 @@ export class PinballHud {
     this.initialCharEls = [charEls[0], charEls[1], charEls[2]];
     this.initialsBox.append(this.initialsLabel, slotsRow);
 
-    this.leaderboardList = document.createElement('div');
-    this.leaderboardList.className = 'cp-leaderboard-list';
-    this.leaderboardList.dataset.uiControl = 'true';
+    this.hubContentList = document.createElement('div');
+    this.hubContentList.className = 'cp-leaderboard-list';
+    this.hubContentList.dataset.uiControl = 'true';
 
     const modalActions = document.createElement('div');
     modalActions.className = 'cp-modal-actions';
@@ -1371,7 +1679,7 @@ export class PinballHud {
     });
 
     modalActions.append(this.modalPlayBtn, closeBtn);
-    modalCard.append(modalHeader, this.initialsBox, this.leaderboardList, modalActions);
+    modalCard.append(modalHeader, hubTabs, this.initialsBox, this.hubContentList, modalActions);
     this.modalBackdrop.appendChild(modalCard);
 
     this.modalBackdrop.addEventListener('click', (e) => {
@@ -1383,6 +1691,7 @@ export class PinballHud {
     root.append(
       topLeft,
       topRight,
+      this.pauseCenterPill,
       this.calloutBanner,
       this.floatLayer,
       plungerWrap,
@@ -1394,6 +1703,15 @@ export class PinballHud {
     );
     container.appendChild(root);
 
+    // Re-render modal automatically when cloud social data refreshes
+    this.unsubscribers.push(
+      this.callbacks.getSocialClient().onChange(() => {
+        if (this.modalOpen && document.activeElement?.tagName !== 'INPUT') {
+          this.renderActiveHubTab();
+        }
+      }),
+    );
+
     this.bindEvents();
   }
 
@@ -1401,8 +1719,20 @@ export class PinballHud {
     return this.modalOpen;
   }
 
+  showNotification(text: string, durationMs = 2000): void {
+    this.showCallout(text, durationMs);
+  }
+
   handleModalKeyDown(event: KeyboardEvent): boolean {
     if (!this.modalOpen) return false;
+
+    const activeTag = document.activeElement?.tagName;
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA') {
+      if (event.code === 'Escape') {
+        (document.activeElement as HTMLElement).blur();
+      }
+      return true;
+    }
 
     if (event.code === 'Escape') {
       event.preventDefault();
@@ -1417,7 +1747,7 @@ export class PinballHud {
       return true;
     }
 
-    if (this.activeRecordEntryId) {
+    if (this.activeRecordEntryId && this.activeHubTab !== 'profile') {
       if (event.code === 'ArrowLeft') {
         event.preventDefault();
         this.selectInitialSlot(((this.selectedInitialSlot + 2) % 3) as 0 | 1 | 2);
@@ -1462,10 +1792,20 @@ export class PinballHud {
     return true;
   }
 
-  openLeaderboardModal(fromGameOver: boolean, finalScore?: number): void {
+  openLeaderboardModal(fromGameOver: boolean, finalScore?: number, initialTab?: HubTab): void {
     if (this.disposed) return;
     this.modalOpen = true;
-    const store = this.callbacks.getHighScoreStore();
+    this.callbacks.onModalPauseChange(true);
+
+    if (initialTab) {
+      this.activeHubTab = initialTab;
+    } else if (fromGameOver) {
+      this.activeHubTab = 'global';
+    }
+    for (const [id, btn] of this.hubTabBtns.entries()) {
+      btn.classList.toggle('active', id === this.activeHubTab);
+    }
+
     const record = fromGameOver ? this.callbacks.getLastGameOverRecord() : null;
 
     if (fromGameOver) {
@@ -1479,7 +1819,7 @@ export class PinballHud {
       this.modalRunScore.textContent = formatScore(finalScore ?? 0);
       this.modalPlayBtn.textContent = '▶ Play Again';
     } else {
-      this.modalKicker.textContent = 'Local Arcade Leaderboard';
+      this.modalKicker.textContent = 'Sanctuary Social & Rankings';
       this.modalTitle.textContent = 'Hall of Champions';
       this.modalRunScore.style.display = 'none';
       this.modalPlayBtn.textContent = '↻ New Game';
@@ -1498,13 +1838,378 @@ export class PinballHud {
       this.initialsBox.classList.remove('visible');
     }
 
-    this.renderLeaderboardRows(store, record?.entry.id ?? null);
+    this.draftFriendQuery = '';
+    this.friendFeedbackMsg = '';
+    this.renderActiveHubTab();
     this.modalBackdrop.classList.add('open');
+
+    // Refresh cloud rankings in the background and re-render unless typing in an input
+    const social = this.callbacks.getSocialClient();
+    void Promise.all([social.refreshLeaderboards(), social.refreshFriends()]).then(() => {
+      if (!this.modalOpen || this.disposed) return;
+      const activeTag = document.activeElement?.tagName;
+      if (activeTag !== 'INPUT' && activeTag !== 'TEXTAREA') {
+        this.renderActiveHubTab();
+      }
+    });
   }
 
   closeLeaderboardModal(): void {
+    if (!this.modalOpen) return;
     this.modalOpen = false;
     this.modalBackdrop.classList.remove('open');
+    this.callbacks.onModalPauseChange(false);
+  }
+
+  private switchHubTab(tab: HubTab): void {
+    this.activeHubTab = tab;
+    for (const [id, btn] of this.hubTabBtns.entries()) {
+      btn.classList.toggle('active', id === tab);
+    }
+    this.initialsBox.classList.toggle(
+      'visible',
+      Boolean(this.activeRecordEntryId && tab !== 'profile'),
+    );
+    this.renderActiveHubTab();
+  }
+
+  private renderActiveHubTab(): void {
+    this.hubContentList.innerHTML = '';
+    if (this.activeHubTab === 'global') {
+      this.renderScoreList(this.callbacks.getSocialClient().getGlobalLeaderboard());
+    } else if (this.activeHubTab === 'friends') {
+      this.renderFriendsTab();
+    } else {
+      this.renderProfileTab();
+    }
+  }
+
+  private renderScoreList(entries: readonly HighScoreEntry[], allowRemoveFriend = false): void {
+    const myId = this.callbacks.getSocialClient().getProfile().userId;
+
+    entries.forEach((entry, idx) => {
+      const rank = idx + 1;
+      const isMe = Boolean(entry.isPlayer || (entry.userId && entry.userId === myId));
+      const row = document.createElement('div');
+      row.className = `cp-lb-row rank-${rank}${isMe || entry.id === this.activeRecordEntryId ? ' highlight' : ''}`;
+
+      const rankEl = document.createElement('span');
+      rankEl.className = 'cp-lb-rank';
+      rankEl.textContent = rank === 1 ? '👑 #1' : `#${rank}`;
+
+      const avatarEl = document.createElement('div');
+      avatarEl.className = 'cp-lb-avatar';
+      avatarEl.style.background = entry.avatarColor ?? '#38bdf8';
+      avatarEl.textContent = entry.initials;
+
+      const playerWrap = document.createElement('div');
+      playerWrap.className = 'cp-lb-player';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'cp-lb-name';
+      nameEl.textContent = entry.displayName
+        ? `${entry.displayName}${isMe ? ' (Du)' : ''}`
+        : `${entry.initials}${isMe ? ' (Du)' : ''}`;
+      playerWrap.appendChild(nameEl);
+
+      if (entry.friendCode) {
+        const codeEl = document.createElement('span');
+        codeEl.className = 'cp-lb-code';
+        codeEl.textContent = entry.friendCode;
+        playerWrap.appendChild(codeEl);
+      }
+
+      const multEl = document.createElement('span');
+      multEl.className = 'cp-lb-mult';
+      multEl.textContent = entry.maxMultiplier > 1 ? `${entry.maxMultiplier}x` : '';
+
+      const rightWrap = document.createElement('div');
+      rightWrap.style.display = 'flex';
+      rightWrap.style.alignItems = 'center';
+      rightWrap.style.gap = '6px';
+
+      const scoreEl = document.createElement('span');
+      scoreEl.className = 'cp-lb-score';
+      scoreEl.textContent = formatScore(entry.score);
+      rightWrap.appendChild(scoreEl);
+
+      if (allowRemoveFriend && entry.userId && !isMe) {
+        const rmBtn = document.createElement('button');
+        rmBtn.type = 'button';
+        rmBtn.className = 'cp-rival-chip';
+        rmBtn.style.padding = '2px 6px';
+        rmBtn.title = 'Ta bort vän';
+        rmBtn.textContent = '✕';
+        rmBtn.addEventListener('click', () => {
+          void this.callbacks
+            .getSocialClient()
+            .removeFriend(entry.userId!)
+            .then(() => this.renderActiveHubTab());
+        });
+        rightWrap.appendChild(rmBtn);
+      }
+
+      row.append(rankEl, avatarEl, playerWrap, multEl, rightWrap);
+      this.hubContentList.appendChild(row);
+    });
+  }
+
+  private renderFriendsTab(): void {
+    const social = this.callbacks.getSocialClient();
+    const me = social.getProfile();
+
+    // Friend Code + Share Invite + Add Friend Card
+    const card = document.createElement('div');
+    card.className = 'cp-friend-card';
+
+    const codeRow = document.createElement('div');
+    codeRow.className = 'cp-friend-code-row';
+
+    const codeInfo = document.createElement('div');
+    const codeLbl = document.createElement('div');
+    codeLbl.className = 'cp-stat-lbl';
+    codeLbl.textContent = 'Din Vänkod';
+    const codeBadge = document.createElement('div');
+    codeBadge.className = 'cp-my-code-badge';
+    codeBadge.textContent = me.friendCode;
+    codeInfo.append(codeLbl, codeBadge);
+
+    const shareBtn = document.createElement('button');
+    shareBtn.type = 'button';
+    shareBtn.className = 'cp-btn cp-btn-gold';
+    shareBtn.textContent = '📤 Bjud in vän';
+    shareBtn.addEventListener('click', () => {
+      const shareUrl = social.getInviteShareUrl();
+      if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+        void navigator
+          .share({
+            title: 'Cathedral Pinball — Utmana mig!',
+            text: `Lägg till mig (${me.friendCode}) på Friends High Score i Cathedral Pinball!`,
+            url: shareUrl,
+          })
+          .catch(() => undefined);
+      } else if (navigator.clipboard?.writeText) {
+        void navigator.clipboard.writeText(shareUrl).then(() => {
+          this.friendFeedbackMsg = 'Inbjudningslänk kopierad!';
+          this.friendFeedbackErr = false;
+          this.renderActiveHubTab();
+        });
+      }
+    });
+    codeRow.append(codeInfo, shareBtn);
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'cp-input-row';
+    const friendInput = document.createElement('input');
+    friendInput.type = 'text';
+    friendInput.className = 'cp-text-input';
+    friendInput.dataset.friendInput = 'true';
+    friendInput.placeholder = 'Vänkod (t.ex. CAT-8821) eller namn...';
+    friendInput.value = this.draftFriendQuery;
+    friendInput.addEventListener('input', () => {
+      this.draftFriendQuery = friendInput.value;
+    });
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.className = 'cp-btn cp-btn-primary';
+    addBtn.dataset.addFriendBtn = 'true';
+    addBtn.textContent = '+ Lägg till';
+
+    const submitAddFriend = async (queryValue: string): Promise<void> => {
+      const q = queryValue.trim();
+      if (!q) return;
+      const res = await social.addFriend(q);
+      if (res.ok && res.friend) {
+        this.draftFriendQuery = '';
+        this.friendFeedbackMsg = `✓ Lade till ${res.friend.displayName} (${res.friend.friendCode})!`;
+        this.friendFeedbackErr = false;
+      } else {
+        this.friendFeedbackMsg = res.error ?? 'Hittade inte spelaren.';
+        this.friendFeedbackErr = true;
+      }
+      this.renderActiveHubTab();
+    };
+
+    addBtn.addEventListener('click', () => {
+      void submitAddFriend(friendInput.value);
+    });
+    friendInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        void submitAddFriend(friendInput.value);
+      }
+    });
+    inputRow.append(friendInput, addBtn);
+
+    const feedbackEl = document.createElement('div');
+    feedbackEl.className = this.friendFeedbackErr ? 'cp-feedback-msg err' : 'cp-feedback-msg';
+    feedbackEl.textContent = this.friendFeedbackMsg;
+
+    card.append(codeRow, inputRow, feedbackEl);
+
+    const suggestions = social.getSuggestions();
+    if (suggestions.length > 0) {
+      const sugWrap = document.createElement('div');
+      const sugLbl = document.createElement('div');
+      sugLbl.className = 'cp-stat-lbl';
+      sugLbl.style.marginBottom = '4px';
+      sugLbl.textContent = 'Snabbtillägg — Aktiva rivaler:';
+      const chips = document.createElement('div');
+      chips.className = 'cp-chip-row';
+      for (const s of suggestions.slice(0, 4)) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'cp-rival-chip';
+        chip.textContent = `+ ${s.displayName} (${s.friendCode})`;
+        chip.addEventListener('click', () => {
+          void submitAddFriend(s.friendCode);
+        });
+        chips.appendChild(chip);
+      }
+      sugWrap.append(sugLbl, chips);
+      card.appendChild(sugWrap);
+    }
+
+    this.hubContentList.appendChild(card);
+
+    // Friends Leaderboard Rankings
+    const listHeader = document.createElement('div');
+    listHeader.className = 'cp-stat-lbl';
+    listHeader.style.margin = '4px 2px 2px';
+    listHeader.textContent = 'Friends High Score List';
+    this.hubContentList.appendChild(listHeader);
+
+    const friendsEntries = [...social.getFriendsLeaderboard()];
+    if (!friendsEntries.some((e) => e.isPlayer || e.userId === me.userId)) {
+      friendsEntries.push({
+        id: `self-${me.userId}`,
+        userId: me.userId,
+        initials: me.initials,
+        displayName: me.displayName,
+        avatarColor: me.avatarColor,
+        friendCode: me.friendCode,
+        score: Math.max(me.bestScore, this.lastScore > 0 ? this.lastScore : 0),
+        maxMultiplier: me.bestMultiplier,
+        dateIso: '2026-11-24',
+        isPlayer: true,
+      });
+      friendsEntries.sort((a, b) => b.score - a.score);
+    }
+    this.renderScoreList(friendsEntries, true);
+  }
+
+  private renderProfileTab(): void {
+    const social = this.callbacks.getSocialClient();
+    const me = social.getProfile();
+
+    const editCard = document.createElement('div');
+    editCard.className = 'cp-friend-card';
+
+    const lblName = document.createElement('div');
+    lblName.className = 'cp-stat-lbl';
+    lblName.textContent = 'Visningsnamn & 3-bokstavs Initialer';
+
+    const editRow = document.createElement('div');
+    editRow.className = 'cp-input-row';
+
+    const nameInp = document.createElement('input');
+    nameInp.type = 'text';
+    nameInp.className = 'cp-text-input';
+    nameInp.maxLength = 22;
+    nameInp.value = me.displayName;
+    nameInp.placeholder = 'Ditt spelarnamn';
+
+    const initInp = document.createElement('input');
+    initInp.type = 'text';
+    initInp.className = 'cp-text-input';
+    initInp.style.maxWidth = '68px';
+    initInp.style.textAlign = 'center';
+    initInp.style.fontWeight = '800';
+    initInp.maxLength = 3;
+    initInp.value = me.initials;
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'cp-btn cp-btn-primary';
+    saveBtn.textContent = 'Spara';
+
+    let selectedColor = me.avatarColor;
+    const swatchRow = document.createElement('div');
+    swatchRow.className = 'cp-swatch-row';
+
+    for (const hex of AVATAR_SWATCHES) {
+      const sw = document.createElement('button');
+      sw.type = 'button';
+      sw.className = hex.toLowerCase() === selectedColor.toLowerCase() ? 'cp-swatch active' : 'cp-swatch';
+      sw.style.background = hex;
+      sw.style.color = hex;
+      sw.addEventListener('click', () => {
+        selectedColor = hex;
+        swatchRow.querySelectorAll('.cp-swatch').forEach((el) => el.classList.remove('active'));
+        sw.classList.add('active');
+      });
+      swatchRow.appendChild(sw);
+    }
+
+    const savedMsg = document.createElement('div');
+    savedMsg.className = 'cp-feedback-msg';
+
+    saveBtn.addEventListener('click', () => {
+      void social
+        .syncProfile({
+          displayName: nameInp.value,
+          initials: initInp.value,
+          avatarColor: selectedColor,
+        })
+        .then((updated) => {
+          this.currentInitials = [
+            updated.initials[0] ?? 'Y',
+            updated.initials[1] ?? 'O',
+            updated.initials[2] ?? 'U',
+          ];
+          savedMsg.textContent = '✓ Spelarprofil sparad och synkad!';
+        });
+    });
+
+    editRow.append(nameInp, initInp, saveBtn);
+    editCard.append(lblName, editRow, swatchRow, savedMsg);
+
+    // Stats Grid
+    const statGrid = document.createElement('div');
+    statGrid.className = 'cp-stat-grid';
+    const stats: Array<[string, string]> = [
+      ['Personbästa', formatScore(Math.max(me.bestScore, this.callbacks.getHighScoreStore().getPlayerBestScore()))],
+      ['Spelade omgångar', formatScore(me.gamesPlayed)],
+      ['Bästa multiplikator', `${me.bestMultiplier}x`],
+      ['Vänkod', me.friendCode],
+    ];
+    for (const [sl, sv] of stats) {
+      const box = document.createElement('div');
+      box.className = 'cp-stat-box';
+      const l = document.createElement('div');
+      l.className = 'cp-stat-lbl';
+      l.textContent = sl;
+      const v = document.createElement('div');
+      v.className = 'cp-stat-val';
+      v.textContent = sv;
+      box.append(l, v);
+      statGrid.appendChild(box);
+    }
+
+    // Open Admin Console Button
+    const adminBtn = document.createElement('button');
+    adminBtn.type = 'button';
+    adminBtn.className = 'cp-btn cp-btn-gold';
+    adminBtn.style.width = '100%';
+    adminBtn.style.marginTop = '4px';
+    adminBtn.dataset.openAdminBtn = 'true';
+    adminBtn.textContent = '🛡️ Öppna Administrationssida (Users & DB)';
+    adminBtn.addEventListener('click', () => {
+      this.closeLeaderboardModal();
+      this.callbacks.onOpenAdmin();
+    });
+
+    this.hubContentList.append(editCard, statGrid, adminBtn);
   }
 
   private selectInitialSlot(slot: 0 | 1 | 2): void {
@@ -1533,41 +2238,15 @@ export class PinballHud {
   }
 
   private commitInitialsUpdate(): void {
-    if (!this.activeRecordEntryId) return;
-    const store = this.callbacks.getHighScoreStore();
     const joined = this.currentInitials.join('');
-    store.updateEntryInitials(this.activeRecordEntryId, joined);
-    this.renderLeaderboardRows(store, this.activeRecordEntryId);
-  }
-
-  private renderLeaderboardRows(store: HighScoreStore, highlightId: string | null): void {
-    this.leaderboardList.innerHTML = '';
-    const entries = store.getEntries();
-
-    entries.forEach((entry, idx) => {
-      const rank = idx + 1;
-      const row = document.createElement('div');
-      row.className = `cp-lb-row rank-${rank}${entry.id === highlightId ? ' highlight' : ''}`;
-
-      const rankEl = document.createElement('span');
-      rankEl.className = 'cp-lb-rank';
-      rankEl.textContent = rank === 1 ? '👑 #1' : `#${rank}`;
-
-      const initEl = document.createElement('span');
-      initEl.className = 'cp-lb-initials';
-      initEl.textContent = entry.initials;
-
-      const multEl = document.createElement('span');
-      multEl.className = 'cp-lb-mult';
-      multEl.textContent = entry.maxMultiplier > 1 ? `${entry.maxMultiplier}x` : '';
-
-      const scoreEl = document.createElement('span');
-      scoreEl.className = 'cp-lb-score';
-      scoreEl.textContent = formatScore(entry.score);
-
-      row.append(rankEl, initEl, multEl, scoreEl);
-      this.leaderboardList.appendChild(row);
-    });
+    if (this.activeRecordEntryId) {
+      const store = this.callbacks.getHighScoreStore();
+      store.updateEntryInitials(this.activeRecordEntryId, joined);
+    }
+    void this.callbacks.getSocialClient().syncProfile({ initials: joined });
+    if (this.activeHubTab !== 'profile') {
+      this.renderActiveHubTab();
+    }
   }
 
   private updateCameraButtonLabel(mode: CameraMode): void {
@@ -1617,6 +2296,7 @@ export class PinballHud {
     const releaseDrag = (e: PointerEvent): void => {
       if (this.plungerDragPointerId !== e.pointerId) return;
       e.stopPropagation();
+      pulseHaptic(14);
       this.plungerDragPointerId = null;
       plungerWrap.classList.remove('dragging');
       try {
@@ -1670,9 +2350,13 @@ export class PinballHud {
       this.scoreValue.textContent = formatScore(snapshot.score);
     }
 
-    if (snapshot.highScore !== this.lastHighScore) {
-      this.lastHighScore = snapshot.highScore;
-      this.bestBtnText.textContent = formatScore(snapshot.highScore);
+    const effectiveBest = Math.max(
+      snapshot.highScore,
+      this.callbacks.getSocialClient().getProfile().bestScore,
+    );
+    if (effectiveBest !== this.lastHighScore) {
+      this.lastHighScore = effectiveBest;
+      this.bestBtnText.textContent = formatScore(effectiveBest);
     }
 
     if (snapshot.ballNumber !== this.lastBallNum || snapshot.maxBalls !== this.lastMaxBalls) {
@@ -1701,14 +2385,37 @@ export class PinballHud {
           : '↻ New';
     }
 
-    // Single smart priority status badge so top-left scoreboard never overflows vertically
+    const adminOverlayOpen = Boolean(this.container.querySelector('.cp-admin-overlay.open'));
+    const showUserPauseBanner = snapshot.paused && !this.modalOpen && !adminOverlayOpen;
+    if (showUserPauseBanner !== this.lastPaused) {
+      this.lastPaused = showUserPauseBanner;
+      this.pauseBtn.textContent = showUserPauseBanner ? '▶ Resume' : '⏸ Pause';
+      this.pauseBtn.classList.toggle('paused', showUserPauseBanner);
+      this.pauseCenterPill.classList.toggle('visible', showUserPauseBanner);
+    }
+
+    // LiveOps indicator pill
+    const liveCfg = this.callbacks.getSocialClient().getLiveConfig();
+    const liveParts: string[] = [];
+    if (liveCfg.doubleScoreActive) liveParts.push('🔥 2x SCORE EVENT');
+    if (liveCfg.announcement) liveParts.push(liveCfg.announcement);
+    const liveText = liveParts.join(' • ');
+    if (liveText !== this.lastLiveOpsKey) {
+      this.lastLiveOpsKey = liveText;
+      this.liveopsPill.textContent = liveText;
+      this.liveopsPill.classList.toggle('visible', Boolean(liveText));
+    }
+
+    // Single smart priority status badge
     const saveSec = Math.ceil(Math.max(0, snapshot.ballSaveRemainingSec));
     const skillVisible =
       snapshot.skillShotAvailable && (snapshot.phase === 'ready' || snapshot.phase === 'playing');
 
     let statusText = 'Ready';
     let statusVariant = '';
-    if (snapshot.phase === 'tilted') {
+    if (snapshot.paused) {
+      statusText = 'Paused';
+    } else if (snapshot.phase === 'tilted') {
       statusText = 'TILT';
       statusVariant = 'danger';
     } else if (snapshot.phase === 'gameOver') {
@@ -1739,7 +2446,7 @@ export class PinballHud {
         : 'cp-status-badge';
     }
 
-    // Live Nudge button warning LEDs & danger ring
+    // Live Nudge warning LEDs
     const tiltKey = `${snapshot.tilted ? 1 : 0}:${snapshot.tiltWarnings}`;
     if (tiltKey !== this.lastTiltKey) {
       this.lastTiltKey = tiltKey;
@@ -1813,12 +2520,17 @@ export class PinballHud {
 
   private bindEvents(): void {
     this.unsubscribers.push(
+      this.bus.on('bumperHit', () => {
+        pulseHaptic(8);
+      }),
       this.bus.on('multiballLock', ({ lockedCount, requiredCount, multiballTriggered }) => {
+        pulseHaptic(22);
         if (!multiballTriggered) {
           this.showCallout(`Sanctuary Lock ${lockedCount}/${requiredCount}`, 1700);
         }
       }),
       this.bus.on('multiballStart', ({ ballCount }) => {
+        pulseHaptic(45);
         this.showCallout(`Multiball Unleashed! (${ballCount} Balls)`, 2400);
         this.spawnFloatingPopup(`MULTIBALL! ${ballCount} BALLS`, '#e879f9');
       }),
