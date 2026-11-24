@@ -145,6 +145,11 @@ export class PinballGameController {
         this.registerCombo('RAMP COMBO!');
         this.addScore(payload.points, `ramp:${payload.rampId}`);
       }),
+      this.bus.on('ballRescue', () => {
+        // Clear combo streak on auto/manual loop-break or rescue so loops cannot farm score
+        this.comboCount = 0;
+        this.comboTimerSec = 0;
+      }),
     );
   }
 

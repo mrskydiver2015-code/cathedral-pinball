@@ -47,6 +47,12 @@ interface BallRecord {
   onRampElapsedSec: number;
   rollEmitAccumSec: number;
   lowSpeedSec: number;
+  recentKickerIds: string[];
+  kickerLoopStreak: number;
+  lastKickerTimeSec: number;
+  loopAnchorX: number;
+  loopAnchorZ: number;
+  loopAnchorSec: number;
 }
 
 interface DropTargetRecord {
@@ -804,6 +810,12 @@ export class PinballPhysicsWorld {
       onRampElapsedSec: 0,
       rollEmitAccumSec: 0,
       lowSpeedSec: 0,
+      recentKickerIds: [],
+      kickerLoopStreak: 0,
+      lastKickerTimeSec: -10,
+      loopAnchorX: pos.x,
+      loopAnchorZ: pos.z,
+      loopAnchorSec: 0,
     };
     this.balls.set(id, record);
     this.ballByCollider.set(collider.handle, record);
@@ -1298,6 +1310,93 @@ export class PinballPhysicsWorld {
     this.maintainBallsPostStep(dt);
   }
 
+  /**
+   * Registers an active kicker (bumper/slingshot) strike and applies:
+   * 1) subtle physical micro-scatter (±6°) to prevent deterministic limit cycles,
+   * 2) progressive deflection toward open lower playfield on 4+ repetitive hits,
+   * 3) hard loop-breaker redirect if a ball still repeats >=7 hits on <=2 kickers or >=10 hits total.
+   */
+  private computeAntiLoopKickVelocity(
+    ball: BallRecord,
+    kickerId: string,
+    dirX: number,
+    dirZ: number,
+    outSpeed: number,
+  ): { readonly x: number; readonly z: number } | null {
+    // Use 4.5s window (> 4.0s combo window); streak resets whenever ball drops to flipper zone (z > 0.30)
+    if (this.simTimeSec - ball.lastKickerTimeSec <= 4.5) {
+      ball.kickerLoopStreak += 1;
+    } else {
+      ball.kickerLoopStreak = 1;
+      ball.recentKickerIds.length = 0;
+    }
+    ball.lastKickerTimeSec = this.simTimeSec;
+    ball.recentKickerIds.push(kickerId);
+    if (ball.recentKickerIds.length > 8) {
+      ball.recentKickerIds.shift();
+    }
+
+    const tail3 = ball.recentKickerIds.slice(-3);
+    const tail4 = ball.recentKickerIds.slice(-4);
+    const distinct3 = new Set(tail3).size;
+    const distinct4 = new Set(tail4).size;
+
+    // Hard failsafe: immediately break persistent 1- or 2-kicker ping-pong loops
+    if (
+      ball.kickerLoopStreak >= 9 ||
+      (ball.kickerLoopStreak >= 6 && distinct4 <= 2) ||
+      (ball.kickerLoopStreak >= 5 && distinct3 === 1)
+    ) {
+      this.breakBallLoop(ball);
+      return null;
+    }
+
+    let vxDir = dirX;
+    let vzDir = dirZ;
+    let speed = outSpeed;
+
+    // Progressive deflection: smoothly steer away from 1-kicker (3+ hits) or 2-kicker (4+ hits) loops
+    if (
+      (ball.kickerLoopStreak >= 3 && distinct3 === 1) ||
+      (ball.kickerLoopStreak >= 4 && distinct4 <= 2) ||
+      ball.kickerLoopStreak >= 6
+    ) {
+      const pos = ball.body.translation();
+      const sideBias = ball.kickerLoopStreak % 2 === 0 ? 0.04 : -0.04;
+      let toCenterX = TABLE_SPEC.playfield.mainCenterX + sideBias - pos.x;
+      let toCenterZ = 0.30 - pos.z;
+      const toLen = Math.hypot(toCenterX, toCenterZ) || 1;
+      toCenterX /= toLen;
+      toCenterZ /= toLen;
+
+      vxDir = vxDir * 0.3 + toCenterX * 0.7;
+      vzDir = vzDir * 0.3 + toCenterZ * 0.7;
+      const blendLen = Math.hypot(vxDir, vzDir) || 1;
+      vxDir /= blendLen;
+      vzDir /= blendLen;
+
+      const deflectRad = (ball.kickerLoopStreak % 2 === 0 ? 1 : -1) * 0.32;
+      const c = Math.cos(deflectRad);
+      const s = Math.sin(deflectRad);
+      const rx = vxDir * c - vzDir * s;
+      const rz = vxDir * s + vzDir * c;
+      vxDir = rx;
+      vzDir = rz;
+      speed = Math.min(speed, 1.25);
+    } else {
+      // Natural rubber/solenoid angular micro-scatter (±6.3°)
+      const scatterRad = (Math.random() - 0.5) * 0.22;
+      const c = Math.cos(scatterRad);
+      const s = Math.sin(scatterRad);
+      const rx = vxDir * c - vzDir * s;
+      const rz = vxDir * s + vzDir * c;
+      vxDir = rx;
+      vzDir = rz;
+    }
+
+    return { x: vxDir * speed, z: vzDir * speed };
+  }
+
   private handleBumperHit(
     ball: BallRecord,
     bumper: Extract<ColliderRole, { kind: 'bumper' }>,
@@ -1320,7 +1419,10 @@ export class PinballPhysicsWorld {
     const vel = ball.body.linvel();
     const outSpeed = Math.max(bumper.impulseMps, Math.hypot(vel.x, vel.z) * 0.75 + bumper.impulseMps * 0.55);
     const capped = Math.min(outSpeed, MAX_BALL_SPEED_MPS);
-    ball.body.setLinvel({ x: dx * capped, y: Math.min(vel.y, 0.2), z: dz * capped }, true);
+    const adjusted = this.computeAntiLoopKickVelocity(ball, bumper.id, dx, dz, capped);
+    if (!adjusted) return;
+
+    ball.body.setLinvel({ x: adjusted.x, y: Math.min(vel.y, 0.2), z: adjusted.z }, true);
     ball.body.wakeUp();
 
     this.bus.emit('bumperHit', {
@@ -1352,8 +1454,17 @@ export class PinballPhysicsWorld {
     const kick = TABLE_SPEC.slingshots.kickImpulseMps;
     const vel = ball.body.linvel();
     const outSpeed = Math.min(MAX_BALL_SPEED_MPS, Math.max(kick, Math.hypot(vel.x, vel.z) * 0.65 + kick * 0.65));
+    const adjusted = this.computeAntiLoopKickVelocity(
+      ball,
+      `slingshot-${sling.side}`,
+      sling.normal.x,
+      sling.normal.z,
+      outSpeed,
+    );
+    if (!adjusted) return;
+
     ball.body.setLinvel(
-      { x: sling.normal.x * outSpeed, y: Math.min(vel.y, 0.15), z: sling.normal.z * outSpeed },
+      { x: adjusted.x, y: Math.min(vel.y, 0.15), z: adjusted.z },
       true,
     );
     ball.body.wakeUp();
@@ -1593,13 +1704,36 @@ export class PinballPhysicsWorld {
       }
 
       // Continuous anti-stall watchdog: rescue any active non-plunger ball < 0.03 m/s for > 1.5 s
-      if (!this.isInPlungerLane(activePos) && speed < 0.03) {
+      const inPlunger = this.isInPlungerLane(activePos);
+      if (!inPlunger && speed < 0.03) {
         ball.lowSpeedSec += dt;
         if (ball.lowSpeedSec > 1.5) {
           this.applyRescueImpulse(ball, false);
         }
       } else {
         ball.lowSpeedSec = 0;
+      }
+
+      // Reset loop detectors once ball reaches lower flipper zone or plunger lane
+      if (inPlunger || activePos.z > 0.30) {
+        ball.kickerLoopStreak = 0;
+        ball.recentKickerIds.length = 0;
+        ball.loopAnchorX = activePos.x;
+        ball.loopAnchorZ = activePos.z;
+        ball.loopAnchorSec = 0;
+      } else if (!ball.onRamp) {
+        // Spatial oscillation trap watchdog: catch high-speed loops confined to a 14.5 cm region > 4.2 s
+        const drift = Math.hypot(activePos.x - ball.loopAnchorX, activePos.z - ball.loopAnchorZ);
+        if (drift > 0.145) {
+          ball.loopAnchorX = activePos.x;
+          ball.loopAnchorZ = activePos.z;
+          ball.loopAnchorSec = 0;
+        } else {
+          ball.loopAnchorSec += dt;
+          if (ball.loopAnchorSec > 4.2) {
+            this.breakBallLoop(ball);
+          }
+        }
       }
 
       // Throttled rolling telemetry for procedural Web Audio friction sound
@@ -1615,6 +1749,62 @@ export class PinballPhysicsWorld {
         }
       }
     }
+  }
+
+  private breakBallLoop(ball: BallRecord): void {
+    if (ball.onRamp) {
+      this.exitRampMode(ball, false);
+    }
+    const pos = ball.body.translation();
+    const targetX = TABLE_SPEC.playfield.mainCenterX + (Math.random() - 0.5) * 0.06;
+    const targetZ = 0.28;
+    let dx = targetX - pos.x;
+    let dz = targetZ - pos.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-4) {
+      dx = 0;
+      dz = 1;
+    } else {
+      dx /= len;
+      dz /= len;
+    }
+
+    const freedPos: Vec3 = {
+      x: clamp(
+        pos.x + dx * 0.012,
+        TABLE_SPEC.playfield.mainActiveXMin + TABLE_SPEC.ball.radius,
+        TABLE_SPEC.playfield.mainActiveXMax - TABLE_SPEC.ball.radius,
+      ),
+      y: TABLE_SPEC.ball.radius,
+      z: clamp(
+        pos.z + dz * 0.012,
+        TABLE_SPEC.playfield.zMin + TABLE_SPEC.ball.radius,
+        TABLE_SPEC.playfield.zMax - TABLE_SPEC.ball.radius,
+      ),
+    };
+
+    ball.body.setTranslation(freedPos, true);
+    ball.body.setLinvel({ x: dx * 1.25, y: 0.02, z: dz * 1.25 }, true);
+    ball.body.wakeUp();
+    ball.lowSpeedSec = 0;
+    ball.kickerLoopStreak = 0;
+    ball.recentKickerIds.length = 0;
+    ball.loopAnchorX = freedPos.x;
+    ball.loopAnchorZ = freedPos.z;
+    ball.loopAnchorSec = 0;
+    this.autoRescueCount += 1;
+
+    this.bus.emit('ballRescue', {
+      ballId: ball.id,
+      manual: false,
+      position: freedPos,
+    });
+    this.bus.emit('lampPulse', {
+      lampId: 'ball-rescue',
+      colorHex: 0x38bdf8,
+      intensity: 2.2,
+      durationMs: 300,
+    });
   }
 
   private applyRescueImpulse(ball: BallRecord, manual: boolean): void {
@@ -1653,6 +1843,11 @@ export class PinballPhysicsWorld {
     ball.body.setLinvel({ x: dx * 0.85, y: 0.02, z: dz * 0.85 }, true);
     ball.body.wakeUp();
     ball.lowSpeedSec = 0;
+    ball.kickerLoopStreak = 0;
+    ball.recentKickerIds.length = 0;
+    ball.loopAnchorX = rescuedPos.x;
+    ball.loopAnchorZ = rescuedPos.z;
+    ball.loopAnchorSec = 0;
     if (!manual) {
       this.autoRescueCount += 1;
     }
