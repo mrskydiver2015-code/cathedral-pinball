@@ -108,6 +108,25 @@ export default defineConfig({
   plugins: [cathedralLocalApiPlugin()],
   build: {
     target: 'esnext',
+    chunkSizeWarningLimit: 4500,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: 'three-webgpu',
+              test: /node_modules[\\/]three/,
+              priority: 20,
+            },
+            {
+              name: 'rapier-physics',
+              test: /node_modules[\\/]@dimforge/,
+              priority: 15,
+            },
+          ],
+        },
+      },
+    },
   },
   server: {
     port: 5173,

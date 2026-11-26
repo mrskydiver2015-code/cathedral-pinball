@@ -14,6 +14,7 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="preload" href="/assets/pinball_table.glb" as="fetch" crossorigin />
     <title>Cathedral Pinball</title>
     <style>
       *,
@@ -48,10 +49,101 @@
         color: #e6e9f2;
         font-family: system-ui, -apple-system, sans-serif;
       }
+
+      #cp-boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 200;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        background: radial-gradient(circle at 50% 38%, #101938 0%, #04050b 72%);
+        transition: opacity 0.28s ease;
+        pointer-events: none;
+      }
+
+      #cp-boot-splash.fade-out {
+        opacity: 0;
+      }
+
+      @keyframes cpRoseSpin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @keyframes cpBarSweep {
+        0% {
+          transform: translateX(-100%);
+        }
+        100% {
+          transform: translateX(220%);
+        }
+      }
+
+      .cp-boot-rose {
+        width: 72px;
+        height: 72px;
+        animation: cpRoseSpin 14s linear infinite;
+        filter: drop-shadow(0 0 18px rgba(56, 189, 248, 0.45));
+      }
+
+      .cp-boot-title {
+        font-size: 16px;
+        font-weight: 900;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: #fef3c7;
+        text-shadow: 0 0 18px rgba(251, 191, 36, 0.35);
+      }
+
+      .cp-boot-track {
+        width: 176px;
+        height: 4px;
+        border-radius: 999px;
+        background: rgba(148, 179, 255, 0.16);
+        overflow: hidden;
+      }
+
+      .cp-boot-fill {
+        width: 48%;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #38bdf8, #e879f9, #fbbf24);
+        animation: cpBarSweep 1.15s ease-in-out infinite;
+      }
+
+      #cp-boot-status {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        color: #94a3b8;
+      }
     </style>
   </head>
   <body>
     <div id="app"></div>
+    <div id="cp-boot-splash" aria-hidden="true">
+      <svg class="cp-boot-rose" viewBox="0 0 64 64" fill="none">
+        <circle cx="32" cy="32" r="28" stroke="#fbbf24" stroke-width="2" opacity="0.85" />
+        <circle cx="32" cy="32" r="18" stroke="#38bdf8" stroke-width="1.8" opacity="0.8" />
+        <path
+          d="M32 4V60M4 32H60M12.2 12.2L51.8 51.8M51.8 12.2L12.2 51.8"
+          stroke="#e879f9"
+          stroke-width="1.5"
+          opacity="0.7"
+        />
+        <circle cx="32" cy="32" r="6" fill="#fde68a" />
+      </svg>
+      <div class="cp-boot-title">Cathedral Pinball</div>
+      <div class="cp-boot-track"><div class="cp-boot-fill"></div></div>
+      <div id="cp-boot-status">Initializing Sanctuary Engine...</div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

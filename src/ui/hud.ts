@@ -256,6 +256,75 @@ const HUD_STYLES = `
   border-color: rgba(251, 113, 133, 0.6);
 }
 
+/* Cathedral Quests & Wizard Mode Row */
+.cp-quests-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.cp-quest-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 3px;
+  padding: 2.5px 5px 4px;
+  border-radius: 6px;
+  background: rgba(14, 21, 46, 0.78);
+  border: 1px solid rgba(148, 179, 255, 0.16);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: #cbd5e1;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+}
+
+.cp-quest-chip.done {
+  background: linear-gradient(135deg, rgba(120, 53, 15, 0.62), rgba(76, 29, 149, 0.52));
+  border-color: rgba(251, 191, 36, 0.65);
+  color: #fef3c7;
+  box-shadow: 0 0 10px rgba(251, 191, 36, 0.22);
+}
+
+.cp-quest-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #38bdf8, #e879f9);
+  transition: width 0.2s ease;
+}
+
+.cp-quest-chip.done .cp-quest-bar {
+  background: #fbbf24;
+}
+
+.cp-wizard-banner {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 3.5px 8px;
+  border-radius: 7px;
+  font-size: 9.5px;
+  font-weight: 900;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #fef9c3;
+  background: linear-gradient(90deg, rgba(161, 98, 7, 0.78), rgba(147, 51, 234, 0.72));
+  border: 1px solid rgba(253, 224, 71, 0.8);
+  box-shadow: 0 0 16px rgba(250, 204, 21, 0.35);
+  font-variant-numeric: tabular-nums;
+}
+
+.cp-wizard-banner.visible {
+  display: flex;
+}
+
 /* LiveOps Announcement Pill */
 .cp-liveops-pill {
   display: none;
@@ -1134,9 +1203,22 @@ const HUD_STYLES = `
     padding: 4px 7px;
   }
   .cp-callout {
-    top: calc(96px + env(safe-area-inset-top));
+    top: calc(114px + env(safe-area-inset-top));
     font-size: 10.5px;
     padding: 5px 12px;
+  }
+  .cp-quests-row {
+    gap: 3px;
+    margin-top: 4px;
+  }
+  .cp-quest-chip {
+    font-size: 7.5px;
+    padding: 2px 4px 3.5px;
+  }
+  .cp-wizard-banner {
+    font-size: 8.5px;
+    padding: 2.5px 6px;
+    margin-top: 4px;
   }
   .cp-plunger-wrap {
     bottom: calc(20px + env(safe-area-inset-bottom));
@@ -1218,6 +1300,16 @@ export class PinballHud {
   private readonly multiplierPill: HTMLSpanElement;
   private readonly lockPips: readonly HTMLSpanElement[];
   private readonly statusBadge: HTMLSpanElement;
+  private readonly questsRow: HTMLDivElement;
+  private readonly questChips: readonly {
+    readonly root: HTMLDivElement;
+    readonly label: HTMLSpanElement;
+    readonly count: HTMLSpanElement;
+    readonly bar: HTMLDivElement;
+  }[];
+  private readonly wizardBanner: HTMLDivElement;
+  private readonly wizardBannerText: HTMLSpanElement;
+  private readonly wizardBannerTimer: HTMLSpanElement;
   private readonly liveopsPill: HTMLDivElement;
 
   private readonly startBtn: HTMLButtonElement;
@@ -1276,6 +1368,7 @@ export class PinballHud {
   private lastMultiplier = -1;
   private lastLocked = -1;
   private lastStatusKey = '';
+  private lastQuestsKey = '';
   private lastLiveOpsKey = '';
   private lastPhase: GamePhase | null = null;
   private lastPaused: boolean | null = null;
@@ -1375,10 +1468,56 @@ export class PinballHud {
 
     metricsRow.append(this.ballPill, this.multiplierPill, lockPill, this.statusBadge);
 
+    // Cathedral Quests Row (Rose / Ramp / Choir) + Active Wizard Mode Banner
+    this.questsRow = document.createElement('div');
+    this.questsRow.className = 'cp-quests-row';
+    const initialQuestLabels = [
+      ['ROSE', `0/${TABLE_SPEC.rules.quests.roseRitualHits}`],
+      ['RAMP', `0/${TABLE_SPEC.rules.quests.rampAscensionShots}`],
+      ['CHOIR', `0/${TABLE_SPEC.rules.quests.sanctuaryChoirHits}`],
+    ] as const;
+    const builtQuestChips: {
+      root: HTMLDivElement;
+      label: HTMLSpanElement;
+      count: HTMLSpanElement;
+      bar: HTMLDivElement;
+    }[] = [];
+
+    for (const [qLbl, qCnt] of initialQuestLabels) {
+      const chip = document.createElement('div');
+      chip.className = 'cp-quest-chip';
+      const lSpan = document.createElement('span');
+      lSpan.textContent = qLbl;
+      const cSpan = document.createElement('span');
+      cSpan.textContent = qCnt;
+      const bar = document.createElement('div');
+      bar.className = 'cp-quest-bar';
+      bar.style.width = '0%';
+      chip.append(lSpan, cSpan, bar);
+      this.questsRow.appendChild(chip);
+      builtQuestChips.push({ root: chip, label: lSpan, count: cSpan, bar });
+    }
+    this.questChips = builtQuestChips;
+
+    this.wizardBanner = document.createElement('div');
+    this.wizardBanner.className = 'cp-wizard-banner';
+    this.wizardBannerText = document.createElement('span');
+    this.wizardBannerText.textContent = '👑 Wizard Mode';
+    this.wizardBannerTimer = document.createElement('span');
+    this.wizardBannerTimer.textContent = '25s';
+    this.wizardBanner.append(this.wizardBannerText, this.wizardBannerTimer);
+
     this.liveopsPill = document.createElement('div');
     this.liveopsPill.className = 'cp-liveops-pill';
 
-    topLeft.append(headerRow, scoreRow, metricsRow, this.liveopsPill);
+    topLeft.append(
+      headerRow,
+      scoreRow,
+      metricsRow,
+      this.questsRow,
+      this.wizardBanner,
+      this.liveopsPill,
+    );
 
     // 2. Symmetrical 2x3 Top-Right Control Grid
     const topRight = document.createElement('div');
@@ -2406,6 +2545,33 @@ export class PinballHud {
       this.liveopsPill.classList.toggle('visible', Boolean(liveText));
     }
 
+    // Cathedral Quests & Wizard Mode HUD sync
+    const wizSec = Math.ceil(Math.max(0, snapshot.wizardTimerSec));
+    const questsKey = snapshot.wizardModeActive
+      ? `wiz:${wizSec}`
+      : snapshot.quests.map((q) => `${q.progress}/${q.target}`).join('|');
+
+    if (questsKey !== this.lastQuestsKey) {
+      this.lastQuestsKey = questsKey;
+      if (snapshot.wizardModeActive) {
+        this.questsRow.style.display = 'none';
+        this.wizardBanner.classList.add('visible');
+        this.wizardBannerTimer.textContent = `SUPER JACKPOT • ${wizSec}s`;
+      } else {
+        this.wizardBanner.classList.remove('visible');
+        this.questsRow.style.display = 'grid';
+        snapshot.quests.forEach((q, idx) => {
+          const chip = this.questChips[idx];
+          if (!chip) return;
+          chip.root.classList.toggle('done', q.completed);
+          chip.label.textContent = q.completed ? `✓ ${q.shortLabel}` : q.shortLabel;
+          chip.count.textContent = q.completed ? 'OK' : `${q.progress}/${q.target}`;
+          const pct = Math.min(100, Math.round((q.progress / Math.max(1, q.target)) * 100));
+          chip.bar.style.width = `${pct}%`;
+        });
+      }
+    }
+
     // Single smart priority status badge
     const saveSec = Math.ceil(Math.max(0, snapshot.ballSaveRemainingSec));
     const skillVisible =
@@ -2531,8 +2697,27 @@ export class PinballHud {
       }),
       this.bus.on('multiballStart', ({ ballCount }) => {
         pulseHaptic(45);
-        this.showCallout(`Multiball Unleashed! (${ballCount} Balls)`, 2400);
-        this.spawnFloatingPopup(`MULTIBALL! ${ballCount} BALLS`, '#e879f9');
+        if (!this.wizardBanner.classList.contains('visible')) {
+          this.showCallout(`Multiball Unleashed! (${ballCount} Balls)`, 2400);
+          this.spawnFloatingPopup(`MULTIBALL! ${ballCount} BALLS`, '#e879f9');
+        }
+      }),
+      this.bus.on('questProgress', ({ title, completed, points }) => {
+        if (completed) {
+          pulseHaptic(32);
+          this.showCallout(`★ ${title} Complete! +${formatScore(points)}`, 2100);
+          this.spawnFloatingPopup(`QUEST COMPLETE +${formatScore(points)}`, '#fde047');
+        }
+      }),
+      this.bus.on('wizardModeStart', ({ ballCount, bonusPoints }) => {
+        pulseHaptic(60);
+        this.showCallout(`👑 Cathedral Ascension! ${ballCount}-Ball Wizard Mode!`, 2800);
+        this.spawnFloatingPopup(`WIZARD MODE +${formatScore(bonusPoints)}`, '#fbbf24');
+      }),
+      this.bus.on('wizardSuperJackpot', ({ source, points }) => {
+        pulseHaptic(38);
+        this.showCallout(`⚡ Super Jackpot (${source}) +${formatScore(points)}`, 1850);
+        this.spawnFloatingPopup(`SUPER JACKPOT +${formatScore(points)}`, '#fde047');
       }),
       this.bus.on('rolloverHit', ({ skillShot, points }) => {
         if (skillShot) {

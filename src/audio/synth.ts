@@ -283,6 +283,17 @@ export class PinballAudioSynth {
       this.bus.on('multiballStart', () => {
         this.playMultiballFanfare();
       }),
+      this.bus.on('questProgress', ({ completed }) => {
+        if (completed) {
+          this.playQuestCompleteFanfare();
+        }
+      }),
+      this.bus.on('wizardModeStart', () => {
+        this.playWizardModeClimax();
+      }),
+      this.bus.on('wizardSuperJackpot', () => {
+        this.playSuperJackpotChime();
+      }),
       this.bus.on('ballDrain', ({ activeBallsRemaining }) => {
         this.playBallDrain(activeBallsRemaining === 0);
       }),
@@ -307,6 +318,100 @@ export class PinballAudioSynth {
         }
       }),
     );
+  }
+
+  private playQuestCompleteFanfare(): void {
+    const audio = this.getActiveOutput();
+    if (!audio) return;
+    const { ctx, out } = audio;
+    const now = ctx.currentTime;
+    // Lydian sanctuary bell motif (D5 -> F#5 -> A5 -> C#6 -> D6)
+    const notes = [587.33, 739.99, 880.0, 1108.73, 1174.66];
+    notes.forEach((freq, idx) => {
+      const start = now + idx * 0.062;
+      this.playBellPartial(ctx, out, start, freq, 0.52, 0.15);
+      this.playBellPartial(ctx, out, start, freq * 1.5, 0.34, 0.05);
+    });
+  }
+
+  private playSuperJackpotChime(): void {
+    const audio = this.getActiveOutput();
+    if (!audio) return;
+    const { ctx, out } = audio;
+    const now = ctx.currentTime;
+    const notes = [659.25, 783.99, 987.77, 1318.51, 1567.98, 1975.53];
+    notes.forEach((freq, idx) => {
+      const start = now + idx * 0.045;
+      this.playBellPartial(ctx, out, start, freq, 0.58, 0.16);
+    });
+  }
+
+  private playWizardModeClimax(): void {
+    const audio = this.getActiveOutput();
+    if (!audio) return;
+    const { ctx, out } = audio;
+    const now = ctx.currentTime;
+
+    // 1. Sub-pedal 32ft + 16ft Cathedral Pipe-Organ foundation (C2 + C3)
+    for (const [freq, peak] of [
+      [65.41, 0.22],
+      [130.81, 0.18],
+    ] as const) {
+      const pedal = ctx.createOscillator();
+      const filter = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+      pedal.type = 'sawtooth';
+      pedal.frequency.setValueAtTime(freq, now);
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(360, now);
+      gain.gain.setValueAtTime(0.001, now);
+      gain.gain.linearRampToValueAtTime(peak, now + 0.09);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 1.85);
+      pedal.connect(filter);
+      filter.connect(gain);
+      gain.connect(out);
+      pedal.start(now);
+      pedal.stop(now + 1.9);
+    }
+
+    // 2. Angelic Choir & Grand Organ Lydian Maj9 chord (C4 E4 G4 B4 F#5)
+    const choirChord = [261.63, 329.63, 392.0, 493.88, 739.99];
+    choirChord.forEach((freq, idx) => {
+      const start = now + 0.05 + idx * 0.05;
+      const oscA = ctx.createOscillator();
+      const oscB = ctx.createOscillator();
+      const formant = ctx.createBiquadFilter();
+      const gain = ctx.createGain();
+
+      oscA.type = 'sawtooth';
+      oscB.type = 'triangle';
+      oscA.frequency.setValueAtTime(freq, start);
+      oscB.frequency.setValueAtTime(freq * 1.003, start);
+
+      formant.type = 'bandpass';
+      formant.frequency.setValueAtTime(920, start);
+      formant.Q.value = 1.6;
+
+      gain.gain.setValueAtTime(0.001, start);
+      gain.gain.linearRampToValueAtTime(0.13, start + 0.12);
+      gain.gain.exponentialRampToValueAtTime(0.001, start + 1.65);
+
+      oscA.connect(formant);
+      oscB.connect(formant);
+      formant.connect(gain);
+      gain.connect(out);
+
+      oscA.start(start);
+      oscB.start(start);
+      oscA.stop(start + 1.7);
+      oscB.stop(start + 1.7);
+    });
+
+    // 3. Celestial Carillon Bell Cascade
+    const bells = [523.25, 659.25, 783.99, 987.77, 1174.66, 1567.98, 2093.0];
+    bells.forEach((freq, idx) => {
+      this.playBellPartial(ctx, out, now + 0.14 + idx * 0.07, freq, 0.8, 0.14);
+    });
   }
 
   private playHighScoreFanfare(): void {

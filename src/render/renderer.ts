@@ -1095,7 +1095,9 @@ export class PinballRenderer {
       const lightAlpha = clampedDt > 0 ? 1 - Math.exp(-20 * clampedDt) : 1;
       this.tableRefs.ballTrackLight.position.lerp(this.ballLightTargetPos, lightAlpha);
       this.tableRefs.ballTrackLight.intensity = 0.85 + Math.min(primaryBall.speedMps / 4, 1) * 0.65;
-      if (state.snapshot.ballSaveRemainingSec > 0) {
+      if (state.snapshot.wizardModeActive) {
+        this.tableRefs.ballTrackLight.color.setHex(0xfde047);
+      } else if (state.snapshot.ballSaveRemainingSec > 0) {
         this.tableRefs.ballTrackLight.color.setHex(0x6ee7b7);
       } else if (state.snapshot.phase === 'multiball') {
         this.tableRefs.ballTrackLight.color.setHex(0xe879f9);
@@ -1271,6 +1273,32 @@ export class PinballRenderer {
       this.bus.on('multiballEnd', () => {
         this.multiballActive = false;
       }),
+      this.bus.on('questProgress', ({ completed }) => {
+        if (completed) {
+          this.roseFlash = Math.max(this.roseFlash, 1.3);
+          this.nudgeVel.z += 0.008;
+        }
+      }),
+      this.bus.on('wizardModeStart', () => {
+        this.multiballActive = true;
+        this.roseFlash = 1.75;
+        this.bumperFlash['bumper-top'] = 1.35;
+        this.bumperFlash['bumper-left'] = 1.35;
+        this.bumperFlash['bumper-right'] = 1.35;
+        this.nudgeVel.z += 0.015;
+        for (const mat of this.trailMaterials) {
+          mat.color.setHex(0xfde047);
+        }
+      }),
+      this.bus.on('wizardSuperJackpot', () => {
+        this.roseFlash = Math.max(this.roseFlash, 1.6);
+        this.nudgeVel.z += 0.01;
+      }),
+      this.bus.on('wizardModeEnd', () => {
+        for (const mat of this.trailMaterials) {
+          mat.color.setHex(0x7dd3fc);
+        }
+      }),
       this.bus.on('lampPulse', ({ lampId, intensity }) => {
         if (lampId === 'bumper-top' || lampId === 'bumper-left' || lampId === 'bumper-right') {
           this.bumperFlash[lampId] = Math.max(this.bumperFlash[lampId], Math.min(intensity, 1.25));
@@ -1300,16 +1328,20 @@ export class PinballRenderer {
     snapshot: GameStateSnapshot,
   ): void {
     const decay = Math.exp(-8.5 * dt);
+    const wizardWave = snapshot.wizardModeActive;
 
-    for (const bumper of TABLE_SPEC.bumpers) {
+    TABLE_SPEC.bumpers.forEach((bumper, idx) => {
       const f = (this.bumperFlash[bumper.id] *= decay);
+      const waveBoost = wizardWave
+        ? 0.45 + 0.45 * Math.sin(elapsed * 9.5 + idx * ((Math.PI * 2) / 3))
+        : 0;
       const light = this.tableRefs.bumperLights[bumper.id];
-      light.intensity = 0.16 + f * 3.2;
+      light.intensity = 0.16 + f * 3.2 + waveBoost * 1.6;
       const capMat = this.tableRefs.bumperCapMaterials[bumper.id];
       if (capMat) {
-        capMat.emissiveIntensity = 1.25 + f * 2.8;
+        capMat.emissiveIntensity = 1.25 + f * 2.8 + waveBoost * 1.4;
       }
-    }
+    });
 
     this.slingshotLeftFlash *= decay;
     this.slingshotRightFlash *= decay;
@@ -1326,8 +1358,9 @@ export class PinballRenderer {
     }
 
     this.roseFlash *= Math.exp(-5.0 * dt);
-    const multiballPulse =
-      this.multiballActive || snapshot.phase === 'multiball'
+    const multiballPulse = snapshot.wizardModeActive
+      ? 0.85 + 0.45 * Math.sin(elapsed * 11.0)
+      : this.multiballActive || snapshot.phase === 'multiball'
         ? 0.55 + 0.35 * Math.sin(elapsed * 8.0)
         : 0.18 + 0.08 * Math.sin(elapsed * 2.1);
 
@@ -1349,7 +1382,7 @@ export class PinballRenderer {
     snapshot: GameStateSnapshot,
   ): void {
     const isMultiball = snapshot.phase === 'multiball' || snapshot.activeBalls >= 2;
-    const desiredZoom = isMultiball ? 1.16 : 1.0;
+    const desiredZoom = snapshot.wizardModeActive ? 1.2 : isMultiball ? 1.16 : 1.0;
 
     let desiredX = 0;
     let desiredZ = 0.16;

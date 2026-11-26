@@ -1044,7 +1044,10 @@ export class PinballPhysicsWorld {
   }
 
   /** Unlock any parked balls + optional trigger ball and eject them toward the main nave. */
-  releaseLockedBalls(triggerBallId?: number, desiredActiveCount = TABLE_SPEC.multiballLock.releaseBallCount): number {
+  releaseLockedBalls(
+    triggerBallId?: number,
+    desiredActiveCount: number = TABLE_SPEC.multiballLock.releaseBallCount,
+  ): number {
     const ejectTargets: BallRecord[] = [];
     for (const ball of this.balls.values()) {
       if (ball.locked) {

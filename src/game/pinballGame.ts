@@ -10,6 +10,8 @@ import type {
   GamePhase,
   GameStateSnapshot,
   NudgeDirection,
+  QuestId,
+  QuestProgressSnapshot,
   Side,
 } from '../shared/types.ts';
 
@@ -61,6 +63,12 @@ export class PinballGameController {
   private rolloverLanesLit: [boolean, boolean, boolean] = [false, false, false];
   private comboCount = 0;
   private comboTimerSec = 0;
+  private roseRitualProgress = 0;
+  private rampAscensionProgress = 0;
+  private sanctuaryChoirProgress = 0;
+  private wizardModeActive = false;
+  private wizardTimerSec = 0;
+  private wizardCompletions = 0;
   private latestFrame: PhysicsFrameData;
   private disposed = false;
 
@@ -111,12 +119,21 @@ export class PinballGameController {
       this.bus.on('bumperHit', (payload) => {
         if (!this.canScore()) return;
         this.registerCombo('BUMPER');
-        this.addScore(payload.points, `bumper:${payload.bumperId}`);
+        const bonus = this.wizardModeActive
+          ? TABLE_SPEC.rules.wizardMode.bumperFrenzyBonusPoints
+          : 0;
+        this.addScore(payload.points + bonus, `bumper:${payload.bumperId}`);
+        if (!this.wizardModeActive) {
+          this.advanceQuest('rose-ritual', 1);
+        }
       }),
       this.bus.on('slingshotHit', (payload) => {
         if (!this.canScore()) return;
         this.registerCombo('SLING');
-        this.addScore(payload.points, `slingshot:${payload.side}`);
+        const bonus = this.wizardModeActive
+          ? TABLE_SPEC.rules.wizardMode.bumperFrenzyBonusPoints
+          : 0;
+        this.addScore(payload.points + bonus, `slingshot:${payload.side}`);
       }),
       this.bus.on('dropTargetHit', (payload) => {
         if (!this.canScore()) return;
@@ -130,6 +147,11 @@ export class PinballGameController {
           payload.points,
           payload.bankComplete ? 'dropTarget:bankComplete' : `dropTarget:${payload.targetId}`,
         );
+        if (this.wizardModeActive && payload.bankComplete) {
+          this.awardWizardSuperJackpot('CHOIR BANK');
+        } else if (!this.wizardModeActive) {
+          this.advanceQuest('sanctuary-choir', 1);
+        }
       }),
       this.bus.on('rampCompleted', (payload) => {
         if (!this.canScore()) return;
@@ -137,6 +159,11 @@ export class PinballGameController {
         this.maxMultiplierReached = Math.max(this.maxMultiplierReached, this.multiplier);
         this.registerCombo('RAMP COMBO!');
         this.addScore(payload.points, `ramp:${payload.rampId}`);
+        if (this.wizardModeActive) {
+          this.awardWizardSuperJackpot('STAINED-GLASS RAMP');
+        } else {
+          this.advanceQuest('ramp-ascension', 1);
+        }
       }),
       this.bus.on('ballRescue', () => {
         // Clear combo streak on auto/manual loop-break or rescue so loops cannot farm score
@@ -144,6 +171,169 @@ export class PinballGameController {
         this.comboTimerSec = 0;
       }),
     );
+  }
+
+  private awardWizardSuperJackpot(source: string): void {
+    const base = TABLE_SPEC.rules.wizardMode.superJackpotPoints;
+    const totalJackpot = base * this.multiplier;
+    this.addScore(base, `wizardJackpot:${source}`);
+    this.bus.emit('wizardSuperJackpot', {
+      source,
+      points: totalJackpot,
+    });
+    this.bus.emit('lampPulse', {
+      lampId: 'wizard-jackpot',
+      colorHex: 0xfde047,
+      intensity: 4.0,
+      durationMs: 550,
+    });
+  }
+
+  private advanceQuest(questId: QuestId, delta = 1): void {
+    if (this.wizardModeActive || !this.canScore()) return;
+    const qRules = TABLE_SPEC.rules.quests;
+
+    let title = '';
+    let target = 1;
+    let rewardBase = 0;
+    let prev = 0;
+    let next = 0;
+
+    if (questId === 'rose-ritual') {
+      title = 'Rose Window Ritual';
+      target = qRules.roseRitualHits;
+      rewardBase = qRules.roseRitualRewardPoints;
+      prev = this.roseRitualProgress;
+      if (prev >= target) return;
+      next = Math.min(target, prev + delta);
+      this.roseRitualProgress = next;
+    } else if (questId === 'ramp-ascension') {
+      title = 'Ascension Rush';
+      target = qRules.rampAscensionShots;
+      rewardBase = qRules.rampAscensionRewardPoints;
+      prev = this.rampAscensionProgress;
+      if (prev >= target) return;
+      next = Math.min(target, prev + delta);
+      this.rampAscensionProgress = next;
+    } else {
+      title = 'Sanctuary Choir';
+      target = qRules.sanctuaryChoirHits;
+      rewardBase = qRules.sanctuaryChoirRewardPoints;
+      prev = this.sanctuaryChoirProgress;
+      if (prev >= target) return;
+      next = Math.min(target, prev + delta);
+      this.sanctuaryChoirProgress = next;
+    }
+
+    const completed = next >= target;
+    let awardedPoints = 0;
+    if (completed) {
+      this.multiplier = Math.min(TABLE_SPEC.rules.maxMultiplier, this.multiplier + 1);
+      this.maxMultiplierReached = Math.max(this.maxMultiplierReached, this.multiplier);
+      awardedPoints = rewardBase * this.multiplier;
+      this.addScore(rewardBase, `questComplete:${questId}`);
+      this.bus.emit('lampPulse', {
+        lampId: `quest-${questId}`,
+        colorHex: 0xfbbf24,
+        intensity: 3.6,
+        durationMs: 650,
+      });
+    }
+
+    this.bus.emit('questProgress', {
+      questId,
+      title,
+      progress: next,
+      target,
+      completed,
+      points: awardedPoints,
+    });
+
+    if (
+      completed &&
+      this.roseRitualProgress >= qRules.roseRitualHits &&
+      this.rampAscensionProgress >= qRules.rampAscensionShots &&
+      this.sanctuaryChoirProgress >= qRules.sanctuaryChoirHits
+    ) {
+      this.triggerWizardMode();
+    }
+  }
+
+  private triggerWizardMode(): void {
+    if (this.disposed) return;
+    const wiz = TABLE_SPEC.rules.wizardMode;
+    this.wizardModeActive = true;
+    this.wizardTimerSec = wiz.durationSec;
+
+    this.multiplier = Math.min(
+      TABLE_SPEC.rules.maxMultiplier,
+      Math.max(this.multiplier + 1, 4),
+    );
+    this.maxMultiplierReached = Math.max(this.maxMultiplierReached, this.multiplier);
+
+    const bonusAwarded = wiz.startBonusPoints * this.multiplier;
+    this.addScore(wiz.startBonusPoints, 'wizardMode:start');
+
+    this.physics.launchAnyBallInPlungerLane(0.9);
+    const activeCount = this.physics.releaseLockedBalls(undefined, wiz.ballCount);
+    this.lockedBalls = 0;
+    this.ballSaveRemainingSec = Math.max(this.ballSaveRemainingSec, wiz.ballSaveSec);
+    this.latestFrame = this.physics.getFrameData();
+
+    this.bus.emit('wizardModeStart', {
+      ballCount: activeCount,
+      durationSec: wiz.durationSec,
+      bonusPoints: bonusAwarded,
+    });
+    this.bus.emit('multiballStart', { ballCount: activeCount });
+    this.bus.emit('lampPulse', {
+      lampId: 'wizard-start',
+      colorHex: 0xfde047,
+      intensity: 4.5,
+      durationMs: 950,
+    });
+    this.transitionPhase('multiball');
+  }
+
+  private endWizardMode(): void {
+    if (!this.wizardModeActive) return;
+    this.wizardModeActive = false;
+    this.wizardTimerSec = 0;
+    this.wizardCompletions += 1;
+    this.roseRitualProgress = 0;
+    this.rampAscensionProgress = 0;
+    this.sanctuaryChoirProgress = 0;
+    this.bus.emit('wizardModeEnd', { completions: this.wizardCompletions });
+  }
+
+  private getQuestSnapshots(): readonly QuestProgressSnapshot[] {
+    const q = TABLE_SPEC.rules.quests;
+    return [
+      {
+        id: 'rose-ritual',
+        shortLabel: 'ROSE',
+        title: 'Rose Window Ritual',
+        progress: this.wizardModeActive ? q.roseRitualHits : this.roseRitualProgress,
+        target: q.roseRitualHits,
+        completed: this.wizardModeActive || this.roseRitualProgress >= q.roseRitualHits,
+      },
+      {
+        id: 'ramp-ascension',
+        shortLabel: 'RAMP',
+        title: 'Ascension Rush',
+        progress: this.wizardModeActive ? q.rampAscensionShots : this.rampAscensionProgress,
+        target: q.rampAscensionShots,
+        completed: this.wizardModeActive || this.rampAscensionProgress >= q.rampAscensionShots,
+      },
+      {
+        id: 'sanctuary-choir',
+        shortLabel: 'CHOIR',
+        title: 'Sanctuary Choir',
+        progress: this.wizardModeActive ? q.sanctuaryChoirHits : this.sanctuaryChoirProgress,
+        target: q.sanctuaryChoirHits,
+        completed: this.wizardModeActive || this.sanctuaryChoirProgress >= q.sanctuaryChoirHits,
+      },
+    ];
   }
 
   private registerCombo(sourceLabel: string): void {
@@ -227,6 +417,12 @@ export class PinballGameController {
     this.rolloverLanesLit = [false, false, false];
     this.comboCount = 0;
     this.comboTimerSec = 0;
+    this.roseRitualProgress = 0;
+    this.rampAscensionProgress = 0;
+    this.sanctuaryChoirProgress = 0;
+    this.wizardModeActive = false;
+    this.wizardTimerSec = 0;
+    this.wizardCompletions = 0;
 
     this.physics.spawnBallInPlungerLane();
     this.phase = 'ready';
@@ -406,6 +602,22 @@ export class PinballGameController {
     this.transitionPhase('multiball');
   }
 
+  forceWizardMode(): void {
+    if (this.disposed) return;
+    if (this.phase === 'attract' || this.phase === 'gameOver') {
+      this.startNewGame();
+    }
+    if (this.tilted) {
+      this.tilted = false;
+      this.tiltWarnings = 0;
+    }
+    const q = TABLE_SPEC.rules.quests;
+    this.roseRitualProgress = q.roseRitualHits;
+    this.rampAscensionProgress = q.rampAscensionShots;
+    this.sanctuaryChoirProgress = q.sanctuaryChoirHits;
+    this.triggerWizardMode();
+  }
+
   private handleRolloverHit(_ballId: number, laneIndex: 0 | 1 | 2): void {
     if (!this.canScore()) return;
     this.rolloverLanesLit[laneIndex] = true;
@@ -426,6 +638,9 @@ export class PinballGameController {
       });
       this.registerCombo('SKILL SHOT!');
       this.addScore(skillPoints, `skillShot:lane-${laneIndex}`);
+      if (!this.wizardModeActive) {
+        this.advanceQuest('sanctuary-choir', 1);
+      }
       return;
     }
 
@@ -447,6 +662,11 @@ export class PinballGameController {
     });
     this.registerCombo(allLit ? 'LANES COMPLETE!' : 'ROLLOVER');
     this.addScore(points, allLit ? 'rollover:allComplete' : `rollover:lane-${laneIndex}`);
+    if (this.wizardModeActive && allLit) {
+      this.awardWizardSuperJackpot('UPPER ARCH CHOIR');
+    } else if (!this.wizardModeActive) {
+      this.advanceQuest('sanctuary-choir', 1);
+    }
   }
 
   private handleMultiballLockHit(ballId: number): void {
@@ -503,6 +723,25 @@ export class PinballGameController {
   private handleBallDrain(ballId: number, activeRemaining: number): void {
     if (this.disposed) return;
 
+    // During Wizard Mode's Sovereign Ball Save, keep all 4 balls roaring in play!
+    if (
+      !this.tilted &&
+      this.wizardModeActive &&
+      this.ballSaveRemainingSec > 0 &&
+      activeRemaining > 0 &&
+      activeRemaining < TABLE_SPEC.rules.wizardMode.ballCount
+    ) {
+      this.physics.spawnMultiballWave(1);
+      this.bus.emit('ballSave', { ballId, remainingSec: this.ballSaveRemainingSec });
+      this.bus.emit('lampPulse', {
+        lampId: 'ball-save',
+        colorHex: 0xfde047,
+        intensity: 3.2,
+        durationMs: 450,
+      });
+      return;
+    }
+
     if (!this.tilted && activeRemaining === 0 && this.ballSaveRemainingSec > 0) {
       const savedWithRemaining = this.ballSaveRemainingSec;
       this.ballSaveRemainingSec = 0;
@@ -533,12 +772,18 @@ export class PinballGameController {
 
     if (this.phase === 'multiball') {
       if (activeRemaining === 1) {
+        if (this.wizardModeActive) {
+          this.endWizardMode();
+        }
         this.bus.emit('multiballEnd', { remainingBallCount: 1 });
         this.transitionPhase(this.tilted ? 'tilted' : 'playing');
         return;
       }
       if (activeRemaining > 1) {
         return;
+      }
+      if (this.wizardModeActive) {
+        this.endWizardMode();
       }
       this.bus.emit('multiballEnd', { remainingBallCount: 0 });
     }
@@ -578,12 +823,14 @@ export class PinballGameController {
     this.physics.setFlipperInput('right', false);
     this.physics.clearLockedBalls();
     this.lockedBalls = 0;
+    this.wizardModeActive = false;
+    this.wizardTimerSec = 0;
     this.lastGameOverRecord = this.highScores.recordScore(
       this.score,
       undefined,
       this.maxMultiplierReached,
     );
-    this.highScore = Math.max(this.highScore, this.highScores.getTopScore());
+    this.highScore = Math.max(this.highScore, this.highScores.getPlayerBestScore());
     void this.social.submitCompletedGameScore(this.score, this.maxMultiplierReached);
     this.transitionPhase('gameOver');
   }
@@ -663,6 +910,12 @@ export class PinballGameController {
           this.skillShotAvailable = false;
         }
       }
+      if (this.wizardModeActive && this.wizardTimerSec > 0) {
+        this.wizardTimerSec = Math.max(0, this.wizardTimerSec - safeDt);
+        if (this.wizardTimerSec === 0) {
+          this.endWizardMode();
+        }
+      }
     }
 
     if (this.comboTimerSec > 0) {
@@ -714,6 +967,10 @@ export class PinballGameController {
       skillShotAvailable: this.skillShotAvailable,
       comboCount: this.comboCount,
       autoRescueCount: this.physics.getAutoRescueCount(),
+      quests: this.getQuestSnapshots(),
+      wizardModeActive: this.wizardModeActive,
+      wizardTimerSec: Number(this.wizardTimerSec.toFixed(1)),
+      wizardCompletions: this.wizardCompletions,
       balls,
     };
   }

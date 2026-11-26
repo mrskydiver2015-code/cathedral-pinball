@@ -4,6 +4,7 @@ import type {
   GamePhase,
   GameStateSnapshot,
   NudgeDirection,
+  QuestId,
   RampId,
   Side,
   Vec3,
@@ -120,6 +121,26 @@ export interface PinballEventMap {
     readonly multiplier: number;
     readonly points: number;
     readonly label: string;
+  };
+  questProgress: {
+    readonly questId: QuestId;
+    readonly title: string;
+    readonly progress: number;
+    readonly target: number;
+    readonly completed: boolean;
+    readonly points: number;
+  };
+  wizardModeStart: {
+    readonly ballCount: number;
+    readonly durationSec: number;
+    readonly bonusPoints: number;
+  };
+  wizardSuperJackpot: {
+    readonly source: string;
+    readonly points: number;
+  };
+  wizardModeEnd: {
+    readonly completions: number;
   };
 }
 

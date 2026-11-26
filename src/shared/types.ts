@@ -34,6 +34,16 @@ export type DropTargetId = 'target-1' | 'target-2' | 'target-3';
 export type RampId = 'stained-glass-ramp';
 export type NudgeDirection = 'left' | 'right' | 'forward';
 export type CameraMode = 'classic' | 'action' | 'top';
+export type QuestId = 'rose-ritual' | 'ramp-ascension' | 'sanctuary-choir';
+
+export interface QuestProgressSnapshot {
+  readonly id: QuestId;
+  readonly shortLabel: string;
+  readonly title: string;
+  readonly progress: number;
+  readonly target: number;
+  readonly completed: boolean;
+}
 
 export interface HighScoreEntry {
   readonly id: string;
@@ -117,6 +127,10 @@ export interface GameStateSnapshot {
   readonly skillShotAvailable: boolean;
   readonly comboCount: number;
   readonly autoRescueCount: number;
+  readonly quests: readonly QuestProgressSnapshot[];
+  readonly wizardModeActive: boolean;
+  readonly wizardTimerSec: number;
+  readonly wizardCompletions: number;
   readonly balls: readonly BallTelemetry[];
 }
 
@@ -167,6 +181,7 @@ export interface PinballDebugHandle {
   launchPlunger(chargeRatio: number): void;
   rescueStuckBalls(): number;
   forceMultiball(): void;
+  forceWizardMode(): void;
   resetGame(): void;
 }
 

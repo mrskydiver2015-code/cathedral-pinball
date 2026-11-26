@@ -271,6 +271,52 @@ async function verifyDesktopAndStress(browser) {
       throw new Error(`${name}: multiball screenshot appears blank`);
     }
 
+    // Verify 4-Ball Wizard Mode ("Cathedral Ascension") + Quest Tracker & Golden Banner
+    await page.evaluate(() => {
+      window.__PINBALL_DEBUG__.resetGame();
+    });
+    await page.waitForTimeout(150);
+    const initialSnap = await page.evaluate(() => window.__PINBALL_DEBUG__.getSnapshot());
+    if (!Array.isArray(initialSnap.quests) || initialSnap.quests.length !== 3) {
+      throw new Error(`${name}: expected 3 Cathedral quests in snapshot`);
+    }
+
+    await page.evaluate(() => {
+      window.__PINBALL_DEBUG__.forceWizardMode();
+    });
+    await page.waitForTimeout(550);
+    const wizSnap = await page.evaluate(() => window.__PINBALL_DEBUG__.getSnapshot());
+    if (
+      !wizSnap.wizardModeActive ||
+      wizSnap.phase !== 'multiball' ||
+      wizSnap.balls.length !== 4 ||
+      wizSnap.wizardTimerSec <= 15
+    ) {
+      throw new Error(
+        `${name}: expected active 4-ball Wizard Mode, got ${JSON.stringify({
+          wizardModeActive: wizSnap.wizardModeActive,
+          phase: wizSnap.phase,
+          balls: wizSnap.balls.length,
+          wizardTimerSec: wizSnap.wizardTimerSec,
+        })}`,
+      );
+    }
+    wizSnap.balls.forEach((b) => assertBallBounds(b, `${name}:wizard-mode`));
+
+    const wizBannerVisible = await page.evaluate(() =>
+      Boolean(document.querySelector('.cp-wizard-banner.visible')),
+    );
+    if (!wizBannerVisible) {
+      throw new Error(`${name}: Wizard Mode HUD banner did not appear`);
+    }
+
+    const wizPng = await page.screenshot({
+      path: path.join(DOCS_OUT_DIR, 'qa_desktop_wizard_mode.png'),
+    });
+    if (!inspectPngBuffer(wizPng).nonBlank) {
+      throw new Error(`${name}: wizard mode screenshot appears blank`);
+    }
+
     // Automated 50-Shot Stress Test verifying zero stuck balls
     const lowSpeedAccumMs = new Map();
     let maxObservedSpeedMps = 0;
@@ -816,13 +862,32 @@ async function verifySocialInviteAndAdmin(browser) {
   attachPageMonitors(page, name, logs, consoleErrors, pageErrors, failedRequests);
 
   try {
-    // Check PWA assets & Cloud API directly
+    // Check PWA assets, Service Worker script, Code-Split Chunks & Cloud API directly
+    const distAssetsDir = path.resolve('dist/assets');
+    if (fs.existsSync(distAssetsDir)) {
+      const assetFiles = fs.readdirSync(distAssetsDir);
+      const hasThreeChunk = assetFiles.some((f) => f.startsWith('three-webgpu-') && f.endsWith('.js'));
+      const hasRapierChunk = assetFiles.some((f) => f.startsWith('rapier-physics-') && f.endsWith('.js'));
+      const hasAdminChunk = assetFiles.some((f) => f.startsWith('adminPanel-') && f.endsWith('.js'));
+      if (!hasThreeChunk || !hasRapierChunk || !hasAdminChunk) {
+        throw new Error(
+          `${name}: expected split chunks (three-webgpu, rapier-physics, adminPanel), got ${JSON.stringify(assetFiles)}`,
+        );
+      }
+    }
+
     const manifestRes = await page.request.get(`${BASE_URL}/manifest.webmanifest`);
     const iconRes = await page.request.get(`${BASE_URL}/icon.svg`);
+    const swRes = await page.request.get(`${BASE_URL}/sw.js`);
     const lbApiRes = await page.request.get(`${BASE_URL}/api/leaderboard`);
-    if (manifestRes.status() !== 200 || iconRes.status() !== 200 || lbApiRes.status() !== 200) {
+    if (
+      manifestRes.status() !== 200 ||
+      iconRes.status() !== 200 ||
+      swRes.status() !== 200 ||
+      lbApiRes.status() !== 200
+    ) {
       throw new Error(
-        `${name}: asset/API check failed (manifest=${manifestRes.status()}, icon=${iconRes.status()}, lb=${lbApiRes.status()})`,
+        `${name}: asset/API check failed (manifest=${manifestRes.status()}, icon=${iconRes.status()}, sw=${swRes.status()}, lb=${lbApiRes.status()})`,
       );
     }
     const lbJson = await lbApiRes.json();
@@ -939,6 +1004,59 @@ async function verifySocialInviteAndAdmin(browser) {
     await mPage.screenshot({ path: path.join(DOCS_OUT_DIR, 'qa_iphone_admin.png') });
   } finally {
     await mobileCtx.close();
+  }
+
+  // 3. 100% Offline Airplane-Mode PWA Service Worker Verification
+  const offlineCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const oPage = await offlineCtx.newPage();
+  const offlinePageErrors = [];
+  const offlineAssetFailures = [];
+  oPage.on('pageerror', (err) => {
+    offlinePageErrors.push(`[offline][pageerror] ${err?.stack ?? String(err)}`);
+  });
+  oPage.on('requestfailed', (req) => {
+    // /api/* requests naturally fail offline and fall back to localStorage inside SocialClient
+    if (!req.url().includes('/api/')) {
+      offlineAssetFailures.push(
+        `[offline][asset-failed] ${req.url()} -> ${req.failure()?.errorText ?? 'unknown'}`,
+      );
+    }
+  });
+
+  try {
+    await oPage.goto(`${BASE_URL}/`, { waitUntil: 'load', timeout: 30000 });
+    await oPage.waitForFunction(() => Boolean(window.__PINBALL_DEBUG__), null, { timeout: 20000 });
+    // Wait for Service Worker registration, activation, and client claim
+    await oPage.waitForFunction(
+      async () => {
+        if (!('serviceWorker' in navigator)) return false;
+        const reg = await navigator.serviceWorker.ready;
+        return Boolean(reg.active && navigator.serviceWorker.controller);
+      },
+      null,
+      { timeout: 12000 },
+    );
+    // Reload once online while controlled so all split JS chunks enter CacheStorage
+    await oPage.reload({ waitUntil: 'load', timeout: 20000 });
+    await oPage.waitForFunction(() => Boolean(window.__PINBALL_DEBUG__), null, { timeout: 15000 });
+
+    // Cut network completely (Airplane Mode!) and reload from scratch
+    await offlineCtx.setOffline(true);
+    await oPage.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+    await oPage.waitForFunction(() => Boolean(window.__PINBALL_DEBUG__), null, { timeout: 15000 });
+    await oPage.waitForTimeout(450);
+
+    const offlineSnap = await oPage.evaluate(() => window.__PINBALL_DEBUG__.getSnapshot());
+    if (offlineSnap.balls.length < 1) {
+      throw new Error(`${name}: offline PWA reload did not spawn ball`);
+    }
+    if (offlinePageErrors.length > 0 || offlineAssetFailures.length > 0) {
+      throw new Error(
+        `${name}: offline PWA errors:\n${[...offlinePageErrors, ...offlineAssetFailures].join('\n')}`,
+      );
+    }
+  } finally {
+    await offlineCtx.close();
   }
 
   if (consoleErrors.length > 0 || pageErrors.length > 0 || failedRequests.length > 0) {

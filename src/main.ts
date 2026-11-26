@@ -5,8 +5,87 @@ import { PinballGameController } from './game/pinballGame.ts';
 import { PinballRenderer } from './render/renderer.ts';
 import { createEventBus } from './shared/events.ts';
 import type { PinballDebugHandle, Side } from './shared/types.ts';
-import { PinballAdminPanel } from './ui/adminPanel.ts';
+import type { AdminPanelOptions, PinballAdminPanel } from './ui/adminPanel.ts';
 import { PinballHud } from './ui/hud.ts';
+
+interface LazyAdminHandle {
+  isOpen(): boolean;
+  open(): void;
+  close(): void;
+  dispose(): void;
+}
+
+function createLazyAdminHandle(
+  container: HTMLElement,
+  options: AdminPanelOptions,
+): LazyAdminHandle {
+  let instance: PinballAdminPanel | null = null;
+  let loadingPromise: Promise<PinballAdminPanel> | null = null;
+  let disposed = false;
+
+  const ensureLoaded = (): Promise<PinballAdminPanel> => {
+    if (instance) return Promise.resolve(instance);
+    if (!loadingPromise) {
+      loadingPromise = import('./ui/adminPanel.ts').then(({ PinballAdminPanel: Ctor }) => {
+        const created = new Ctor(container, options);
+        if (disposed) {
+          created.dispose();
+        } else {
+          instance = created;
+        }
+        return created;
+      });
+    }
+    return loadingPromise;
+  };
+
+  return {
+    isOpen: () => instance?.isOpen() ?? false,
+    open: () => {
+      if (disposed) return;
+      void ensureLoaded().then((panel) => {
+        if (!disposed) panel.open();
+      });
+    },
+    close: () => {
+      instance?.close();
+    },
+    dispose: () => {
+      disposed = true;
+      instance?.dispose();
+      instance = null;
+    },
+  };
+}
+
+function updateBootSplashStatus(message: string): void {
+  const el = document.querySelector<HTMLElement>('#cp-boot-status');
+  if (el) el.textContent = message;
+}
+
+function dismissBootSplash(): void {
+  const splash = document.querySelector<HTMLElement>('#cp-boot-splash');
+  if (!splash) return;
+  splash.classList.add('fade-out');
+  window.setTimeout(() => {
+    splash.remove();
+  }, 300);
+}
+
+function registerOfflineServiceWorker(): void {
+  if (!import.meta.env.PROD || typeof navigator === 'undefined') return;
+  if (!('serviceWorker' in navigator)) return;
+
+  const registerNow = (): void => {
+    void navigator.serviceWorker.register('/sw.js').catch(() => undefined);
+  };
+
+  if (document.readyState === 'complete') {
+    registerNow();
+  } else {
+    window.addEventListener('load', registerNow, { once: true });
+  }
+}
 
 function getForceWebGLFlag(): boolean {
   const params = new URLSearchParams(window.location.search);
@@ -38,7 +117,7 @@ function bindControls(params: {
   audio: PinballAudioSynth;
   renderer: PinballRenderer;
   hud: PinballHud;
-  admin: PinballAdminPanel;
+  admin: LazyAdminHandle;
 }): () => void {
   const { container, game, audio, renderer, hud, admin } = params;
 
@@ -287,6 +366,8 @@ async function bootstrap(): Promise<void> {
   container.style.overflow = 'hidden';
   container.style.touchAction = 'none';
 
+  updateBootSplashStatus('Loading Rapier3D & Stained-Glass Sanctuary...');
+
   const bus = createEventBus();
   const forceWebGL = getForceWebGLFlag();
 
@@ -305,7 +386,7 @@ async function bootstrap(): Promise<void> {
     game.setOverlayPaused(modalOpenState || adminOpenState);
   };
 
-  const adminPanel = new PinballAdminPanel(container, {
+  const adminPanel = createLazyAdminHandle(container, {
     social: game.getSocialClient(),
     onOpenChange: (open) => {
       adminOpenState = open;
@@ -385,6 +466,7 @@ async function bootstrap(): Promise<void> {
     launchPlunger: (chargeRatio: number) => game.launchPlunger(chargeRatio),
     rescueStuckBalls: () => game.rescueStuckBalls(),
     forceMultiball: () => game.forceMultiball(),
+    forceWizardMode: () => game.forceWizardMode(),
     resetGame: () => game.startNewGame(),
   };
   window.__PINBALL_DEBUG__ = debugHandle;
@@ -425,6 +507,8 @@ async function bootstrap(): Promise<void> {
   };
 
   rafId = window.requestAnimationFrame(frame);
+  dismissBootSplash();
+  registerOfflineServiceWorker();
 
   window.addEventListener(
     'pagehide',
@@ -448,6 +532,7 @@ async function bootstrap(): Promise<void> {
 
 void bootstrap().catch((err: unknown) => {
   console.error('[Cathedral Pinball] Fatal initialization error:', err);
+  dismissBootSplash();
   const container = document.querySelector<HTMLDivElement>('#app');
   if (container) {
     container.innerHTML = `<pre style="padding:24px;color:#fda4af;">Initialization failed: ${

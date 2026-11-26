@@ -304,6 +304,22 @@ export const TABLE_SPEC = {
     ballsPerGame: 3,
     maxTiltWarnings: 2,
     maxMultiplier: 8,
+    quests: {
+      roseRitualHits: 10,
+      roseRitualRewardPoints: 4000,
+      rampAscensionShots: 3,
+      rampAscensionRewardPoints: 5000,
+      sanctuaryChoirHits: 5,
+      sanctuaryChoirRewardPoints: 4500,
+    },
+    wizardMode: {
+      ballCount: 4,
+      durationSec: 25,
+      ballSaveSec: 15,
+      startBonusPoints: 10000,
+      superJackpotPoints: 2500,
+      bumperFrenzyBonusPoints: 500,
+    },
   },
 
   anchorNodes: {
